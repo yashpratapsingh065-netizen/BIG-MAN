@@ -1,7 +1,7 @@
 import json
+import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
-import sqlite3
 
 import pandas as pd
 import streamlit as st
@@ -16,244 +16,288 @@ st.set_page_config(page_title="BIG MAN Trading Lab", page_icon="🤖", layout="w
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("""CREATE TABLE IF NOT EXISTS paper_trades (
+    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con.execute("""CREATE TABLE IF NOT EXISTS paper_trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        created_at TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        side TEXT NOT NULL,
-        entry REAL NOT NULL,
-        stop REAL NOT NULL,
-        target REAL NOT NULL,
-        quantity REAL NOT NULL,
-        status TEXT NOT NULL DEFAULT 'OPEN',
-        exit_price REAL,
-        pnl REAL
+        created_at TEXT NOT NULL, symbol TEXT NOT NULL, timeframe TEXT NOT NULL,
+        side TEXT NOT NULL, entry REAL NOT NULL, stop REAL NOT NULL, target REAL NOT NULL,
+        quantity REAL NOT NULL, status TEXT NOT NULL DEFAULT 'OPEN',
+        exit_price REAL, pnl REAL, exit_reason TEXT, strategy_note TEXT
     )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY, value TEXT NOT NULL
-    )""")
-    conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('virtual_balance','10000')")
-    conn.commit()
-    return conn
+    # Safely add fields if an older database already exists.
+    existing = {r[1] for r in con.execute("PRAGMA table_info(paper_trades)").fetchall()}
+    for name, typ in [("timeframe", "TEXT"), ("exit_reason", "TEXT"), ("strategy_note", "TEXT")]:
+        if name not in existing:
+            con.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {typ}")
+    con.execute("""CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)""")
+    con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('virtual_balance','10000')")
+    con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('auto_paper','0')")
+    con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('last_processed_candle','')")
+    con.commit()
+    return con
 
 
-def load_strategies():
-    return json.loads(STRATEGIES_PATH.read_text(encoding="utf-8"))
+def get_setting(con, key, default=""):
+    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(con, key, value):
+    con.execute("INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+    con.commit()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_forex_data(ticker, interval, period):
-    """Fetch recent candles from Yahoo Finance; availability and delay can vary."""
-    frame = yf.download(
-        ticker,
-        period=period,
-        interval=interval,
-        auto_adjust=False,
-        progress=False,
-        threads=False,
-    )
+def fetch_candles(ticker, interval, period):
+    frame = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False, threads=False)
     if frame is None or frame.empty:
         return pd.DataFrame()
     if isinstance(frame.columns, pd.MultiIndex):
         frame.columns = frame.columns.get_level_values(0)
-    needed = ["Open", "High", "Low", "Close"]
-    if not all(col in frame.columns for col in needed):
-        return pd.DataFrame()
     frame = frame.reset_index()
     time_col = "Datetime" if "Datetime" in frame.columns else "Date"
     if time_col not in frame.columns:
         time_col = frame.columns[0]
-    result = pd.DataFrame({
-        "time": pd.to_datetime(frame[time_col], errors="coerce"),
+    needed = ["Open", "High", "Low", "Close"]
+    if not all(c in frame.columns for c in needed):
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "time": pd.to_datetime(frame[time_col], errors="coerce", utc=True),
         "open": pd.to_numeric(frame["Open"], errors="coerce"),
         "high": pd.to_numeric(frame["High"], errors="coerce"),
         "low": pd.to_numeric(frame["Low"], errors="coerce"),
         "close": pd.to_numeric(frame["Close"], errors="coerce"),
     })
-    result = result.dropna(subset=["time", "open", "high", "low", "close"])
-    return result.tail(500).reset_index(drop=True)
+    return out.dropna().tail(500).reset_index(drop=True)
 
 
-def load_trades(conn):
-    return pd.read_sql_query("SELECT * FROM paper_trades ORDER BY id DESC", conn)
+def strategy_signals(data):
+    """Transparent rule-based proxies inspired by the library themes, not validated versions of the original strategies."""
+    d = data.copy()
+    d["sma20"] = d.close.rolling(20).mean()
+    d["sma50"] = d.close.rolling(50).mean()
+    d["prior_high"] = d.high.shift(1).rolling(20).max()
+    d["prior_low"] = d.low.shift(1).rolling(20).min()
+    d["range"] = d.high - d.low
+    d["atr14"] = d["range"].rolling(14).mean()
+    last = d.iloc[-1]
+    prev = d.iloc[-2] if len(d) > 1 else last
+    close, opn, high, low = [float(last[k]) for k in ("close", "open", "high", "low")]
+    signals = []
+    def add(name, side, why):
+        signals.append({"Strategy": name, "Signal": side, "Reason": why})
+
+    # S/R proxy: close near prior 20-candle extremes with candle confirmation.
+    pl, ph = last.get("prior_low"), last.get("prior_high")
+    if pd.notna(pl) and low <= float(pl) * 1.001 and close > opn:
+        add("SR_001 Support & Resistance", "BUY", "Near recent low with bullish candle (proxy rule).")
+    elif pd.notna(ph) and high >= float(ph) * 0.999 and close < opn:
+        add("SR_001 Support & Resistance", "SELL", "Near recent high with bearish candle (proxy rule).")
+    else: add("SR_001 Support & Resistance", "WAIT", "No clear recent-extreme confirmation.")
+
+    # Fibonacci proxy uses recent 50-candle swing and 38.2%-61.8% retracement band.
+    recent = d.tail(50)
+    swing_low, swing_high = float(recent.low.min()), float(recent.high.max())
+    band_low = swing_high - (swing_high - swing_low) * 0.618
+    band_high = swing_high - (swing_high - swing_low) * 0.382
+    if band_low <= close <= band_high and close > opn: add("FIB_001 Fibonacci + Price Action", "BUY", "In approximate retracement band with bullish candle.")
+    elif band_low <= close <= band_high and close < opn: add("FIB_001 Fibonacci + Price Action", "SELL", "In approximate retracement band with bearish candle.")
+    else: add("FIB_001 Fibonacci + Price Action", "WAIT", "No retracement-band candle confirmation.")
+
+    if pd.notna(ph) and close > float(ph): add("CR_001 Chart Reading / Breakout", "BUY", "Close above prior 20-candle high.")
+    elif pd.notna(pl) and close < float(pl): add("CR_001 Chart Reading / Breakout", "SELL", "Close below prior 20-candle low.")
+    else: add("CR_001 Chart Reading / Breakout", "WAIT", "No 20-candle breakout.")
+
+    # Fake-breakout proxy: price wicks beyond previous range but closes back inside.
+    if pd.notna(ph) and high > float(ph) and close < float(ph): add("TRAP_001 Fake Breakout", "SELL", "Wick above recent high then close back below.")
+    elif pd.notna(pl) and low < float(pl) and close > float(pl): add("TRAP_001 Fake Breakout", "BUY", "Wick below recent low then close back above.")
+    else: add("TRAP_001 Fake Breakout", "WAIT", "No clear failed breakout.")
+
+    if pd.notna(last.get("sma20")) and pd.notna(last.get("sma50")):
+        if close > float(last.sma20) > float(last.sma50): add("MTF_001 Trend Alignment (single-TF proxy)", "BUY", "Close above SMA20 above SMA50; true multi-timeframe check not implemented.")
+        elif close < float(last.sma20) < float(last.sma50): add("MTF_001 Trend Alignment (single-TF proxy)", "SELL", "Close below SMA20 below SMA50; true multi-timeframe check not implemented.")
+        else: add("MTF_001 Trend Alignment (single-TF proxy)", "WAIT", "Moving averages not aligned.")
+    else: add("MTF_001 Trend Alignment (single-TF proxy)", "WAIT", "Need more candles.")
+
+    body = close - opn
+    prev_body = float(prev.close) - float(prev.open)
+    if body > 0 and prev_body > 0 and close > float(prev.close): add("PA_001 Three-Step Price Action", "BUY", "Two bullish candles with rising close (proxy rule).")
+    elif body < 0 and prev_body < 0 and close < float(prev.close): add("PA_001 Three-Step Price Action", "SELL", "Two bearish candles with falling close (proxy rule).")
+    else: add("PA_001 Three-Step Price Action", "WAIT", "No two-candle momentum confirmation.")
+
+    # Trendline proxy approximated by recent swing range, not a hand-drawn trendline.
+    if pd.notna(last.get("sma20")) and close > float(last.sma20) and low <= float(last.sma20) and close > opn: add("TL_001 Trendline Bounce (SMA proxy)", "BUY", "Bullish candle touching SMA20 proxy.")
+    elif pd.notna(last.get("sma20")) and close < float(last.sma20) and high >= float(last.sma20) and close < opn: add("TL_001 Trendline Bounce (SMA proxy)", "SELL", "Bearish candle touching SMA20 proxy.")
+    else: add("TL_001 Trendline Bounce (SMA proxy)", "WAIT", "No SMA-touch bounce proxy.")
+
+    # Supply/demand proxy from prior range extremes.
+    if pd.notna(pl) and low <= float(pl) * 1.002 and close > opn: add("SD_001 Supply & Demand (range proxy)", "BUY", "Bullish reaction near recent range low.")
+    elif pd.notna(ph) and high >= float(ph) * 0.998 and close < opn: add("SD_001 Supply & Demand (range proxy)", "SELL", "Bearish reaction near recent range high.")
+    else: add("SD_001 Supply & Demand (range proxy)", "WAIT", "No reaction near recent range edge.")
+    return pd.DataFrame(signals), last
 
 
-conn = db()
+def close_open_trades_on_candle(con, symbol, last):
+    rows = con.execute("SELECT id,side,entry,stop,target,quantity FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
+    close_events = []
+    for trade_id, side, entry, stop, target, qty in rows:
+        hit = None
+        exit_price = None
+        # Conservative assumption: if SL and TP are both inside same candle, assume SL first.
+        if side == "BUY":
+            if float(last.low) <= stop: hit, exit_price = "STOP_LOSS", stop
+            elif float(last.high) >= target: hit, exit_price = "TAKE_PROFIT", target
+        else:
+            if float(last.high) >= stop: hit, exit_price = "STOP_LOSS", stop
+            elif float(last.low) <= target: hit, exit_price = "TAKE_PROFIT", target
+        if hit:
+            pnl = (exit_price - entry) * qty if side == "BUY" else (entry - exit_price) * qty
+            con.execute("UPDATE paper_trades SET status='CLOSED',exit_price=?,pnl=?,exit_reason=? WHERE id=?", (exit_price, pnl, hit, trade_id))
+            close_events.append(f"Paper trade #{trade_id} closed at {exit_price:.5f}: {hit}; simplified P/L ${pnl:.2f}.")
+    con.commit()
+    return close_events
+
+
+def create_auto_trade(con, symbol, timeframe, side, last, signals, balance):
+    if con.execute("SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'").fetchone()[0] > 0:
+        return "No new trade: one open paper trade already exists."
+    atr = last.get("atr14")
+    if pd.isna(atr) or float(atr) <= 0:
+        return "No trade: not enough candles to calculate the stop distance."
+    entry = float(last.close)
+    stop_distance = max(float(atr) * 1.5, entry * 0.001)
+    stop = entry - stop_distance if side == "BUY" else entry + stop_distance
+    target = entry + stop_distance * 1.5 if side == "BUY" else entry - stop_distance * 1.5
+    # EURUSD's price difference × EUR units approximates USD P/L; this is a simplified demo calculation.
+    risk_cash = max(1.0, float(balance) * 0.005)  # 0.5% virtual-balance risk budget
+    qty = risk_cash / stop_distance
+    qty = min(qty, 10000.0)  # cap virtual position size for the prototype
+    note = f"Auto paper rule: at least 5 of 8 proxy signals agree {side}; risk budget approx 0.5% virtual balance."
+    con.execute("""INSERT INTO paper_trades(created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note)
+        VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?)""", (datetime.now(timezone.utc).isoformat(), symbol, timeframe, side, entry, stop, target, qty, note))
+    con.commit()
+    return f"Opened AUTO PAPER {side} at {entry:.5f}; SL {stop:.5f}; TP {target:.5f}; virtual units {qty:.0f}."
+
+
+con = db()
 st.title("🤖 BIG MAN — Trading Lab")
-st.caption("Version 1.1 • Forex market-data preview + draft strategy library + paper-trade journal")
-st.warning(
-    "Educational prototype only. Yahoo Finance data can be delayed, incomplete, or unavailable. "
-    "This app does not send orders to a broker. Never treat its test signal as financial advice."
-)
+st.caption("Version 2.0 • EUR/USD H1-first multi-strategy prototype + automatic paper trading")
+st.warning("EDUCATIONAL PAPER-TRADING ONLY. No broker orders are sent. Yahoo Finance data can be delayed or incomplete. This is not financial advice and the strategy proxies are not validated.")
 
 with st.sidebar:
     st.header("Settings")
-    symbol_labels = {"EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "JPY=X"}
-    symbol = st.selectbox("Forex pair", list(symbol_labels.keys()), index=0)
-    timeframe_options = {"15m": ("15m", "5d"), "1h": ("60m", "1mo"), "1d": ("1d", "6mo")}
-    timeframe = st.selectbox("Chart timeframe", list(timeframe_options.keys()), index=0)
-    st.caption("Source: Yahoo Finance via yfinance. Quotes may be delayed; this is not guaranteed real-time data.")
+    pair_options = {"EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "JPY=X"}
+    symbol = st.selectbox("Forex pair", list(pair_options.keys()), index=0)
+    tf_options = {"H1 (1 hour)": ("60m", "1mo"), "M15 (15 minutes)": ("15m", "5d"), "D1 (1 day)": ("1d", "6mo")}
+    timeframe_label = st.selectbox("Chart timeframe", list(tf_options.keys()), index=0)
+    interval, period = tf_options[timeframe_label]
+    balance_saved = float(get_setting(con, "virtual_balance", "10000"))
+    balance = st.number_input("Virtual balance ($)", min_value=100.0, max_value=10000000.0, value=balance_saved, step=500.0)
+    if st.button("Save virtual balance"):
+        set_setting(con, "virtual_balance", balance)
+        st.success("Virtual balance saved.")
+    auto_on = get_setting(con, "auto_paper", "0") == "1"
+    new_auto = st.toggle("Enable automatic PAPER trading", value=auto_on, help="Only simulated trades. Runs when the app reruns/refreshes; it is not a 24/7 background service.")
+    if new_auto != auto_on:
+        set_setting(con, "auto_paper", "1" if new_auto else "0")
+        st.rerun()
+    st.caption("Data: Yahoo Finance. Automatic paper rules are evaluated when this page runs; not continuously in the background.")
     if st.button("Refresh market data"):
         st.cache_data.clear()
         st.rerun()
-    st.divider()
-    st.write("**Virtual starting balance**")
-    balance_row = conn.execute("SELECT value FROM settings WHERE key='virtual_balance'").fetchone()
-    balance = st.number_input("Balance ($)", min_value=100.0, max_value=10000000.0, value=float(balance_row[0]), step=500.0)
-    if st.button("Save virtual balance"):
-        conn.execute("UPDATE settings SET value=? WHERE key='virtual_balance'", (str(balance),))
-        conn.commit()
-        st.success("Virtual balance saved.")
 
-tab_dashboard, tab_strategies, tab_paper, tab_notes = st.tabs(
-    ["📊 Analyzer", "📚 Strategy Library", "🧪 Paper Trading", "🛠️ Setup & Limits"]
-)
+analyzer, strategy_tab, paper_tab, limits_tab = st.tabs(["📊 Analyzer", "📚 Strategy Library", "🧪 Paper Trading", "🛠️ Setup & Limits"])
 
-with tab_dashboard:
-    st.subheader("Forex market analyzer")
-    yf_symbol = symbol_labels[symbol]
-    interval, period = timeframe_options[timeframe]
-    with st.spinner(f"Fetching {symbol} candles..."):
-        try:
-            data = load_forex_data(yf_symbol, interval, period)
-        except Exception as exc:
-            data = pd.DataFrame()
-            st.error(f"Market data request failed: {exc}")
-
-    if data.empty:
-        st.error(
-            "Forex candles are not available right now. This may be a provider/network limitation. "
-            "No synthetic prices are substituted, so no signal is shown."
-        )
-        st.info("Try Refresh market data, choose another timeframe, or try again later. Yahoo Finance availability varies by pair and interval.")
-    else:
-        last = data.iloc[-1]
-        prior = data.iloc[-2] if len(data) > 1 else last
-        data["sma20"] = data["close"].rolling(20).mean()
-        avg = data["sma20"].iloc[-1]
-        if pd.notna(avg) and last["close"] > avg and last["close"] > prior["close"]:
-            signal, reason = "BUY (TEST RULE)", "Latest close is above its 20-candle average and above the previous close."
-        elif pd.notna(avg) and last["close"] < avg and last["close"] < prior["close"]:
-            signal, reason = "SELL (TEST RULE)", "Latest close is below its 20-candle average and below the previous close."
-        else:
-            signal, reason = "WAIT", "The simple test conditions do not agree, or there are not enough candles."
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Forex pair", symbol)
-        c2.metric("Latest close", f"{last['close']:.5f}")
-        c3.metric("Educational test signal", signal)
-        st.caption(f"Latest candle timestamp reported by provider: {last['time']}")
-        st.info(
-            f"**Why:** {reason}  \n"
-            "**Data status:** downloaded from Yahoo Finance; may be delayed or incomplete. "
-            "This is not a validated trading strategy."
-        )
-        fig = go.Figure(data=[go.Candlestick(
-            x=data["time"], open=data["open"], high=data["high"],
-            low=data["low"], close=data["close"], name=f"{symbol} candles"
-        )])
-        fig.add_trace(go.Scatter(x=data["time"], y=data["sma20"], mode="lines", name="20-candle average"))
-        fig.update_layout(
-            title=f"{symbol} — Yahoo Finance candles (availability/delay may vary)",
-            xaxis_title="Time", yaxis_title="Price", height=470, xaxis_rangeslider_visible=False
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.caption(
-        "The signal is only a simple moving-average demonstration. The eight saved strategies "
-        "are not yet combined, validated, or backtested. No live or demo orders are sent."
-    )
-    st.subheader("Prototype risk calculator")
-    col1, col2, col3 = st.columns(3)
-    entry = col1.number_input("Example entry", min_value=0.00001, value=1.08000, format="%.5f")
-    stop = col2.number_input("Example stop-loss", min_value=0.00000, value=1.07800, format="%.5f")
-    rr = col3.selectbox("Reward/risk target", [1.0, 1.5, 2.0, 3.0], index=1)
-    risk_distance = abs(entry - stop)
-    target = entry + risk_distance * rr if entry >= stop else entry - risk_distance * rr
-    st.write(f"Illustrative target based on chosen reward/risk: **{target:.5f}**. This example is not linked to the selected pair and does not calculate account-currency P/L.")
-
-with tab_strategies:
-    st.subheader("Strategy database (draft rules)")
+with analyzer:
+    st.subheader(f"{symbol} — {timeframe_label}")
     try:
-        strategies = load_strategies()
-        for item in strategies:
-            with st.expander(f"{item['id']} — {item['name']}"):
-                st.write(f"**Status:** {item['status']}")
-                st.write("**Rules:**")
-                st.json(item["rules"])
-                st.write("**Risk framework:**")
-                st.json(item["risk"])
-                st.write("**Still needs defining:**")
-                st.write(", ".join(item["unknowns"]))
-                st.caption(item["notes"])
+        data = fetch_candles(pair_options[symbol], interval, period)
+    except Exception as exc:
+        data = pd.DataFrame()
+        st.error(f"Market data fetch failed: {exc}")
+    if data.empty or len(data) < 3:
+        st.error("Yahoo Finance did not return enough candles. No automatic trade can be evaluated right now.")
+    else:
+        signal_df, last = strategy_signals(data)
+        votes = signal_df[signal_df.Signal.isin(["BUY", "SELL"])].groupby("Signal").size().to_dict()
+        buys, sells = int(votes.get("BUY", 0)), int(votes.get("SELL", 0))
+        combined = "BUY" if buys >= 5 and buys > sells else "SELL" if sells >= 5 and sells > buys else "WAIT"
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Latest close", f"{float(last.close):.5f}")
+        c2.metric("BUY votes", buys)
+        c3.metric("SELL votes", sells)
+        c4.metric("Combined signal", combined)
+        st.caption(f"Latest provider candle timestamp (UTC): {last.time}. Last candle may still be forming.")
+        st.dataframe(signal_df, use_container_width=True, hide_index=True)
+        fig = go.Figure(data=[go.Candlestick(x=data.time, open=data.open, high=data.high, low=data.low, close=data.close, name=symbol)])
+        data["sma20"] = data.close.rolling(20).mean()
+        fig.add_trace(go.Scatter(x=data.time, y=data.sma20, mode="lines", name="SMA 20"))
+        fig.update_layout(title=f"{symbol} — Yahoo Finance candles", xaxis_title="Time", yaxis_title="Price", height=430, xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+        st.info("These eight are simplified proxy rules inspired by the saved strategy themes—not faithful, backtested or proven versions. MTF, Fibonacci, trendline and zones are approximations.")
+
+        # Evaluate exits on latest candle, once per new provider candle. On refresh/rerun, no repeated entry on same candle.
+        candle_key = f"{symbol}|{interval}|{last.time}"
+        close_messages = close_open_trades_on_candle(con, symbol, last)
+        for msg in close_messages: st.success(msg)
+        already_processed = get_setting(con, "last_processed_candle", "") == candle_key
+        if get_setting(con, "auto_paper", "0") == "1" and not already_processed:
+            if combined in ("BUY", "SELL"):
+                msg = create_auto_trade(con, symbol, timeframe_label, combined, last, signal_df, balance)
+                st.success(msg) if msg.startswith("Opened") else st.info(msg)
+            else:
+                st.info("Auto paper mode is ON, but combined signal is WAIT; no trade opened.")
+            set_setting(con, "last_processed_candle", candle_key)
+        elif get_setting(con, "auto_paper", "0") == "1" and already_processed:
+            st.caption("This candle was already evaluated; refresh after a new candle is available to evaluate again.")
+        st.caption("Auto trading checks candles only when this app runs or refreshes. It is NOT a continuously running 24/7 bot. If both SL and TP fall within one candle, this prototype assumes SL first.")
+
+with strategy_tab:
+    st.subheader("Saved strategy library")
+    try:
+        strategy_items = json.loads(STRATEGIES_PATH.read_text(encoding="utf-8"))
+        for item in strategy_items:
+            with st.expander(f"{item.get('id','Strategy')} — {item.get('name','Unnamed')}"):
+                st.write(f"**Status:** {item.get('status','Draft')}")
+                st.json(item.get("rules", {}))
+                st.write("**Risk:**")
+                st.json(item.get("risk", {}))
+                st.write("**Unknowns:**", ", ".join(item.get("unknowns", [])))
+                st.caption(item.get("notes", ""))
         st.download_button("Download strategies.json", data=STRATEGIES_PATH.read_bytes(), file_name="strategies.json", mime="application/json")
     except Exception as exc:
         st.error(f"Could not load strategies.json: {exc}")
 
-with tab_paper:
-    st.subheader("Paper-trading journal")
-    st.caption("Manual virtual trades only. No orders are sent anywhere.")
-    with st.form("new_trade"):
-        a, b, c = st.columns(3)
-        trade_symbol = a.selectbox("Symbol", ["EURUSD", "GBPUSD", "USDJPY"], key="trade_symbol")
-        side = b.selectbox("Side", ["BUY", "SELL"])
-        qty = c.number_input("Units (virtual)", min_value=1.0, value=1000.0, step=1000.0)
-        a, b, c = st.columns(3)
-        trade_entry = a.number_input("Entry price", min_value=0.00001, value=1.08000, format="%.5f", key="trade_entry")
-        trade_stop = b.number_input("Stop price", min_value=0.00000, value=1.07800, format="%.5f", key="trade_stop")
-        trade_target = c.number_input("Target price", min_value=0.00001, value=1.08400, format="%.5f", key="trade_target")
-        submitted = st.form_submit_button("Record virtual trade")
-    if submitted:
-        valid = (side == "BUY" and trade_stop < trade_entry < trade_target) or (side == "SELL" and trade_target < trade_entry < trade_stop)
-        if not valid:
-            st.error("Check levels: BUY needs Stop < Entry < Target; SELL needs Target < Entry < Stop.")
-        else:
-            conn.execute(
-                """INSERT INTO paper_trades(created_at,symbol,side,entry,stop,target,quantity,status)
-                   VALUES(?,?,?,?,?,?,?,'OPEN')""",
-                (datetime.now(timezone.utc).isoformat(), trade_symbol, side, trade_entry, trade_stop, trade_target, qty),
-            )
-            conn.commit()
-            st.success("Virtual trade recorded in the app database. On hosted deployments, local storage may reset.")
-            st.rerun()
-    trades = load_trades(conn)
-    if not trades.empty:
+with paper_tab:
+    st.subheader("Automatic paper-trade journal")
+    st.caption("Max one open paper trade across all pairs. P/L is simplified and excludes spread, slippage, swap and conversion details.")
+    trades = pd.read_sql_query("SELECT * FROM paper_trades ORDER BY id DESC", con)
+    if trades.empty:
+        st.write("No paper trades yet. Enable automatic PAPER trading in the sidebar; an entry only happens if the combined proxy signal qualifies.")
+    else:
         st.dataframe(trades, use_container_width=True, hide_index=True)
-        open_trades = trades[trades.status == "OPEN"]
-        if not open_trades.empty:
-            ids = open_trades["id"].tolist()
-            chosen_id = st.selectbox("Select open trade to close", ids)
-            exit_price = st.number_input("Virtual exit price", min_value=0.00001, value=1.08000, format="%.5f")
-            if st.button("Close selected virtual trade"):
-                row = open_trades[open_trades.id == chosen_id].iloc[0]
-                pnl = (exit_price - row.entry) * row.quantity if row.side == "BUY" else (row.entry - exit_price) * row.quantity
-                conn.execute("UPDATE paper_trades SET status='CLOSED', exit_price=?, pnl=? WHERE id=?", (exit_price, pnl, int(chosen_id)))
-                conn.commit()
-                st.success(f"Closed virtual trade. Simplified P/L: {pnl:.2f} price-units × units. This is NOT account-currency P/L; pip value, spread, leverage and conversion are not modeled.")
-                st.rerun()
+        open_rows = trades[trades.status == "OPEN"]
+        if not open_rows.empty:
+            st.metric("Open paper trade", f"#{int(open_rows.iloc[0]['id'])} {open_rows.iloc[0]['side']} {open_rows.iloc[0]['symbol']}")
         closed = trades[trades.status == "CLOSED"]
         if not closed.empty:
-            wins = int((closed["pnl"] > 0).sum())
-            st.metric("Closed-trade win rate", f"{wins / len(closed) * 100:.1f}%", help="Based only on manually entered virtual trades; not evidence of strategy performance.")
-    else:
-        st.write("No paper trades yet. Add a virtual trade above to begin the journal.")
+            wins = int((closed.pnl > 0).sum())
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Closed trades", len(closed))
+            col2.metric("Win rate", f"{wins / len(closed) * 100:.1f}%")
+            col3.metric("Simplified net P/L", f"${closed.pnl.sum():.2f}")
+    st.warning("This is a software prototype, not a reliable trading system. Do not use these signals for real-money decisions.")
 
-with tab_notes:
-    st.subheader("What is implemented now?")
+with limits_tab:
+    st.subheader("What this version does and does not do")
     st.markdown("""
-- Forex candles are requested from Yahoo Finance using `yfinance`.
-- Provider data can be delayed, incomplete, or unavailable; this is not guaranteed real-time data.
-- If no candles are returned, the app shows an error and does not invent replacement prices.
-- Strategy records are stored in `strategies.json`.
-- Paper-trade entries and exits use SQLite in the app's local filesystem; hosted persistence is not guaranteed.
-- The test signal uses only a simple 20-candle average rule.
-- The eight strategy records are drafts, not a validated combined signal engine.
-- No broker credentials, live order execution, or automated real-money trading are included.
-""")
-    st.subheader("Next steps")
-    st.markdown("""
-1. Confirm the data provider returns candles for the selected pair and timeframe.
-2. Define measurable rules for each draft strategy and add tests.
-3. Backtest chronologically with realistic spread/fees and avoid look-ahead bias.
-4. Paper-test and review drawdown and performance before any broker demo integration.
-""")
+- Fetches Yahoo Finance candles when the app runs or is refreshed.
+- Shows eight separate **proxy** signals and a combined signal (5 agreeing votes required).
+- Can create simulated paper trades if automatic PAPER mode is enabled.
+- Allows at most one open paper trade across all pairs.
+- Uses an ATR-like recent candle-range stop and a 1.5R target, with a 0.5% virtual-balance risk budget (position size capped).
+- Checks stop/target against the latest candle only when the app runs; it is not a background 24/7 service.
+- No broker connection, no demo-account orders, no real-money orders.
+- Strategies are approximations, not validated implementations. No backtest or profitability claim has been made.
+- Paper-trade database may reset on some hosted deployments; do not treat it as permanent storage.
+    """)
