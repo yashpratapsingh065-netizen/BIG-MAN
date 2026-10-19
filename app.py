@@ -218,11 +218,11 @@ with analyzer:
     if data.empty or len(data) < 3:
         st.error("Yahoo Finance did not return enough candles. No automatic trade can be evaluated right now.")
     else:
-        signal_df, last = strategy_signals(data)
+                signal_df, last = strategy_signals(data)
         votes = signal_df[signal_df.Signal.isin(["BUY", "SELL"])].groupby("Signal").size().to_dict()
         buys, sells = int(votes.get("BUY", 0)), int(votes.get("SELL", 0))
         combined = "BUY" if buys >= 5 and buys > sells else "SELL" if sells >= 5 and sells > buys else "WAIT"
-                        candle_key = f"{symbol}|{interval}|{last.time}"
+        candle_key = f"{symbol}|{interval}|{last.time}"
         open_count = int(
             con.execute(
                 "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
