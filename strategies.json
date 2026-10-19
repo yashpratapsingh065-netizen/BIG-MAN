@@ -1,0 +1,218 @@
+[
+  {
+    "id": "SR_001",
+    "name": "Support & Resistance with Confirmation",
+    "status": "draft",
+    "rules": {
+      "long": [
+        "Price reaches a defined support zone",
+        "Bullish engulfing confirmation",
+        "Moving-average filter is bullish"
+      ],
+      "short": [
+        "Price reaches a defined resistance zone",
+        "Evening-star/bearish confirmation",
+        "Moving-average filter is bearish"
+      ]
+    },
+    "risk": {
+      "stop_loss": "Beyond support/resistance zone with buffer",
+      "target": "Next opposing support/resistance zone"
+    },
+    "unknowns": [
+      "Support/resistance detection method",
+      "MA period and exact crossover rules",
+      "Candle-pattern definitions",
+      "Timeframe"
+    ],
+    "notes": "Rules extracted from user-provided transcript; needs objective definitions and backtesting."
+  },
+  {
+    "id": "FIB_001",
+    "name": "Fibonacci Retracement + Price Action",
+    "status": "draft",
+    "rules": {
+      "long": [
+        "Uptrend with higher highs/higher lows",
+        "Price retraces into 0.5-0.618 zone",
+        "Bullish candle confirmation",
+        "Entry only after defined confirmation close"
+      ],
+      "short": [
+        "Downtrend with lower highs/lower lows",
+        "Pullback into 0.5-0.618 zone",
+        "Bearish candle confirmation"
+      ]
+    },
+    "risk": {
+      "stop_loss": "Beyond recent swing",
+      "target": "Prior swing, with optional extension target"
+    },
+    "unknowns": [
+      "Swing-point algorithm",
+      "Exact Fibonacci orientation/extension rules",
+      "Entry timing and candle definitions"
+    ],
+    "notes": "Video win-rate/probability claims are unverified and are not used as model assumptions."
+  },
+  {
+    "id": "CR_001",
+    "name": "Chart Reading & Breakout",
+    "status": "draft",
+    "rules": {
+      "long": [
+        "Bullish structure",
+        "Strong close above defined resistance"
+      ],
+      "short": [
+        "Bearish structure",
+        "Strong close below defined support"
+      ]
+    },
+    "risk": {
+      "stop_loss": "Beyond breakout/breakdown candle extreme with buffer",
+      "target": "Swing target or configured reward/risk"
+    },
+    "unknowns": [
+      "Objective trend/level definitions",
+      "Strong-candle threshold",
+      "Breakout buffer and timeframe"
+    ],
+    "notes": "Breakout rules need testing; breakout does not guarantee continuation."
+  },
+  {
+    "id": "TRAP_001",
+    "name": "Fake Breakout / Trap",
+    "status": "draft",
+    "rules": {
+      "watch_levels": [
+        "Previous day high/low",
+        "Current day high/low",
+        "Configured round-number levels"
+      ],
+      "possible_trap": [
+        "Breakout lacks confirmation or quickly re-enters range",
+        "Relative volume/reversal confirmation if reliable volume data exists"
+      ]
+    },
+    "risk": {
+      "stop_loss": "Beyond failed-breakout extreme",
+      "target": "Range interior or opposite key level"
+    },
+    "unknowns": [
+      "Consolidation/time-spent threshold",
+      "Relative-volume calculation",
+      "Definition of failed breakout"
+    ],
+    "notes": "Treats a trap as a price/volume pattern, not proof of deliberate institutional manipulation. Original 1-minute options and 10% premium rules are market-specific and are not enabled for Forex."
+  },
+  {
+    "id": "MTF_001",
+    "name": "Multi-Timeframe Alignment",
+    "status": "draft",
+    "rules": {
+      "timeframes": [
+        "4H direction",
+        "1H behavior",
+        "15M entry"
+      ],
+      "long": [
+        "All three defined timeframe filters bullish",
+        "Entry timeframe pullback and bullish confirmation"
+      ],
+      "short": [
+        "All three defined timeframe filters bearish",
+        "Entry timeframe pullback and bearish confirmation"
+      ]
+    },
+    "risk": {
+      "stop_loss": "Beyond recent swing/zone",
+      "target": "Higher-timeframe swing or opposing zone"
+    },
+    "unknowns": [
+      "Exact trend indicator/structure rules",
+      "Timezone/session handling",
+      "Closed-candle requirement"
+    ],
+    "notes": "Source was a user-provided summary; verify before treating as validated."
+  },
+  {
+    "id": "PA_001",
+    "name": "Three-Step Price Action",
+    "status": "draft",
+    "rules": {
+      "steps": [
+        "Determine trend/market structure",
+        "Wait for key-level retest",
+        "Require objective candle/rejection confirmation"
+      ]
+    },
+    "risk": {
+      "stop_loss": "Beyond key level or swing with buffer",
+      "target": "Recent swing or opposing zone"
+    },
+    "unknowns": [
+      "Swing detection",
+      "Retest tolerance",
+      "Candle confirmation definitions"
+    ],
+    "notes": "Source was a user-provided summary; verify before treating as validated."
+  },
+  {
+    "id": "TL_001",
+    "name": "Trendline Bounce / Breakout",
+    "status": "draft",
+    "rules": {
+      "bounce": [
+        "Trendline/zone has at least three objective touch points",
+        "Price returns to zone",
+        "Rejection confirmation"
+      ],
+      "breakout": [
+        "Candle closes beyond trendline/zone",
+        "Optional retest confirmation"
+      ]
+    },
+    "risk": {
+      "stop_loss": "Beyond recent swing/zone",
+      "target": "Next opposing level or configured reward/risk"
+    },
+    "unknowns": [
+      "Swing-point and line-fitting algorithm",
+      "Touch tolerance",
+      "Trendline-break buffer"
+    ],
+    "notes": "Three touches are a heuristic, not a guarantee of validity."
+  },
+  {
+    "id": "SD_001",
+    "name": "Supply & Demand Zones",
+    "status": "draft",
+    "rules": {
+      "demand": [
+        "Define a base candle/compact base before strong upward displacement",
+        "Store zone bounds",
+        "Wait for retest and bullish confirmation"
+      ],
+      "supply": [
+        "Define a base candle/compact base before strong downward displacement",
+        "Store zone bounds",
+        "Wait for retest and bearish confirmation"
+      ],
+      "confluence": [
+        "Optional Fibonacci 0.5-0.618 overlap"
+      ]
+    },
+    "risk": {
+      "stop_loss": "Beyond zone/swing with buffer",
+      "target": "Opposing zone or recent swing"
+    },
+    "unknowns": [
+      "Momentum threshold",
+      "Base-candle selection",
+      "Zone invalidation/expiry",
+      "Volume data requirements"
+    ],
+    "notes": "Zones are technical hypotheses; chart data cannot prove institutional intent."
+  }
+]
