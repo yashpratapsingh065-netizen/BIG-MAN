@@ -222,6 +222,65 @@ with analyzer:
         votes = signal_df[signal_df.Signal.isin(["BUY", "SELL"])].groupby("Signal").size().to_dict()
         buys, sells = int(votes.get("BUY", 0)), int(votes.get("SELL", 0))
         combined = "BUY" if buys >= 5 and buys > sells else "SELL" if sells >= 5 and sells > buys else "WAIT"
+                candle_key = f"{symbol}|{interval}|{last.time}"
+
+        open_count = int(
+            con.execute(
+                "SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'"
+            ).fetchone()[0]
+        )
+
+        auto_enabled = get_setting(con, "auto_paper", "0") == "1"
+
+        already_processed = (
+            get_setting(con, "last_processed_candle", "") == candle_key
+        )
+
+        st.subheader("🤖 Auto Trading Status")
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric(
+            "Automatic Paper Trading",
+            "ON 🟢" if auto_enabled else "OFF 🔴"
+        )
+
+        c2.metric("Open Paper Trades", open_count)
+
+        c3.metric(
+            "Candle Checked",
+            "YES" if already_processed else "NO"
+        )
+
+        if not auto_enabled:
+            st.warning(
+                "Auto Trading OFF hai. Sidebar mein Enable automatic PAPER trading ON karo."
+            )
+
+        elif combined == "WAIT":
+            st.info(
+                f"Abhi trade nahi khula. BUY votes: {buys}, "
+                f"SELL votes: {sells}. "
+                "BUY ya SELL ke liye kam se kam 5 agreeing votes chahiye."
+            )
+
+        elif open_count > 0:
+            st.info(
+                "Ek paper trade pehle se OPEN hai. "
+                "Naya trade tabhi khulega jab purana trade close ho."
+            )
+
+        elif already_processed:
+            st.info(
+                "Is candle ki checking pehle ho chuki hai. "
+                "Nayi candle aane par dobara check hoga."
+            )
+
+        else:
+            st.success(
+                f"{combined} signal mila hai. "
+                "Paper trade ki entry conditions check hongi."
+            )
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Latest close", f"{float(last.close):.5f}")
         c2.metric("BUY votes", buys)
