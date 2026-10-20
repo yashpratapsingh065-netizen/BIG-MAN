@@ -1,7 +1,8 @@
 import json
 import sqlite3
+import time
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -34,15 +35,21 @@ TIMEFRAMES = {
 }
 
 
-def utc_now():
+def utc_now_str():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def db_connect():
-    # Removed WAL mode for Streamlit Cloud compatibility to prevent locking issues
-    con = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
-    con.row_factory = sqlite3.Row
-    return con
+    # SQLite connection with timeout and retry handling for concurrency/locks
+    for attempt in range(5):
+        try:
+            con = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
+            con.row_factory = sqlite3.Row
+            return con
+        except sqlite3.OperationalError:
+            if attempt == 4:
+                raise
+            time.sleep(0.5)
 
 
 def init_db():
@@ -59,6 +66,8 @@ def init_db():
             quantity REAL NOT NULL,
             status TEXT NOT NULL DEFAULT 'OPEN',
             exit_price REAL,
+            exit_time TEXT,
+            duration TEXT,
             pnl REAL,
             exit_reason TEXT,
             strategy_note TEXT
@@ -78,23 +87,18 @@ def init_db():
             if not existing:
                 con.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, value))
                 
+        # Safe migrations for paper_trades table
         columns = {row[1] for row in con.execute("PRAGMA table_info(paper_trades)").fetchall()}
         migrations = {
             "timeframe": "TEXT NOT NULL DEFAULT 'H1'",
+            "exit_time": "TEXT",
+            "duration": "TEXT",
             "exit_reason": "TEXT",
             "strategy_note": "TEXT",
         }
         for name, definition in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {definition}")
-                
-        try:
-            old = con.execute("SELECT value FROM app_settings WHERE key='last_processed_candle'").fetchone()
-            new = con.execute("SELECT value FROM app_settings WHERE key='last_processed_candles'").fetchone()
-            if old and new and new[0] == "{}" and old[0]:
-                con.execute("UPDATE app_settings SET value=? WHERE key='last_processed_candles'", (json.dumps({"legacy": old[0]}),))
-        except Exception:
-            pass
 
 
 def get_setting(key, default=""):
@@ -118,7 +122,6 @@ def set_setting(key, value):
         st.warning(f"Setting save nahi ho saki: {exc}")
 
 
-# Helper to update settings using an existing open connection (prevents DB lock)
 def con_set_setting(con, key, value):
     existing = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
     if existing:
@@ -135,7 +138,7 @@ def load_processed_candles():
         return {}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_candles(ticker, interval, period):
     try:
         raw = yf.download(
@@ -147,7 +150,7 @@ def fetch_candles(ticker, interval, period):
             threads=False,
         )
         if raw is None or raw.empty:
-            return pd.DataFrame(), f"Yahoo Finance ne {ticker} ke liye data nahi diya. Thodi der baad refresh karein."
+            return pd.DataFrame(), f"Yahoo Finance ne {ticker} ke liye data nahi diya. Fresh market data abhi unavailable ho sakta hai."
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).strip() for c in raw.columns]
@@ -168,7 +171,7 @@ def fetch_candles(ticker, interval, period):
             return pd.DataFrame(), "Market data mila, lekin usable candles nahi mile."
         return data, None
     except Exception as exc:
-        return pd.DataFrame(), f"Market data fetch error: {type(exc).__name__}: {exc}"
+        return pd.DataFrame(), f"Market data fetch error (Fresh market data unavailable): {type(exc).__name__}: {exc}"
 
 
 def strategy_signals(data):
@@ -209,45 +212,69 @@ def strategy_signals(data):
     return df, pd.DataFrame(signals), atr
 
 
-def close_open_trades_on_candle(con, symbol, last_candle):
+def evaluate_and_close_trades(con, symbol, last_candle):
+    """Evaluate open paper trades against SL/TP or 15-minute maximum duration limit."""
     trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
     closed = 0
     hi, lo = float(last_candle["high"]), float(last_candle["low"])
-    candle_time = pd.Timestamp(last_candle["time"])
+    current_close = float(last_candle["close"])
+    now_utc = datetime.now(timezone.utc)
+    
     for trade in trades:
         try:
             created_time = pd.Timestamp(trade["created_at"])
             if created_time.tzinfo is None:
                 created_time = created_time.tz_localize("UTC")
-            if created_time >= candle_time:
-                continue
         except (TypeError, ValueError):
             continue
+
         side = trade["side"]
         stop, target, entry, qty = float(trade["stop"]), float(trade["target"]), float(trade["entry"]), float(trade["quantity"])
         exit_price, reason = None, None
+
+        # 1. Check Stop Loss / Take Profit first
         if side == "BUY":
             if lo <= stop:
                 exit_price, reason = stop, "Stop Loss"
             elif hi >= target:
                 exit_price, reason = target, "Take Profit"
-            pnl = (exit_price-entry)*qty if exit_price is not None else None
         else:
             if hi >= stop:
                 exit_price, reason = stop, "Stop Loss"
             elif lo <= target:
                 exit_price, reason = target, "Take Profit"
-            pnl = (entry-exit_price)*qty if exit_price is not None else None
+
+        # 2. Check 15-minute maximum duration time exit
+        elapsed_minutes = (now_utc - created_time.to_pydatetime()).total_seconds() / 60.0
+        if exit_price is None and elapsed_minutes >= 15.0:
+            exit_price, reason = current_close, "Time Exit"
+
         if exit_price is not None:
-            con.execute("UPDATE paper_trades SET status='CLOSED', exit_price=?, pnl=?, exit_reason=? WHERE id=?", (exit_price, pnl, reason, trade["id"]))
+            exit_time_str = utc_now_str()
+            duration_delta = now_utc - created_time.to_pydatetime()
+            mins = int(duration_delta.total_seconds() // 60)
+            secs = int(duration_delta.total_seconds() % 60)
+            duration_str = f"{mins}m {secs}s"
+
+            if side == "BUY":
+                pnl = (exit_price - entry) * qty
+            else:
+                pnl = (entry - exit_price) * qty
+
+            con.execute(
+                "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_time=?, duration=?, pnl=?, exit_reason=? WHERE id=?",
+                (exit_price, exit_time_str, duration_str, pnl, reason, trade["id"])
+            )
             closed += 1
     return closed
 
 
 def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, signals):
+    # Rule: Maximum of 3 simultaneously open paper trades
     open_count = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'").fetchone()[0]
-    if open_count:
-        return False, "Pehle se ek open paper trade hai; naya trade nahi banaya."
+    if open_count >= 3:
+        return False, "Maximum 3 open paper trades ki limit poori ho chuki hai."
+    
     entry = float(last_candle["close"])
     stop_distance = max(float(atr) * 1.5, entry * 0.001)
     stop = entry - stop_distance if side == "BUY" else entry + stop_distance
@@ -255,8 +282,9 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     risk_cash = max(1.0, float(balance) * 0.005)
     qty = min(risk_cash / stop_distance, 10000.0)
     note = ", ".join(signals.loc[signals["Signal"] == side, "Strategy"].tolist())
+    
     con.execute("""INSERT INTO paper_trades(created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note)
-                  VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?)""", (utc_now(), symbol, timeframe, side, entry, stop, target, qty, note))
+                  VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?)""", (utc_now_str(), symbol, timeframe, side, entry, stop, target, qty, note))
     return True, f"Demo paper {side} trade created."
 
 
@@ -285,12 +313,12 @@ with st.sidebar:
         set_setting("virtual_balance", new_balance)
         st.success("Virtual balance saved.")
     auto_enabled = get_setting("auto_paper", "0") == "1"
-    new_auto = st.toggle("Auto paper trading", value=auto_enabled, help="Creates simulated trades when you open/refresh the app. It does not run continuously in the background.")
+    new_auto = st.toggle("Auto paper trading", value=auto_enabled, help="Creates simulated trades when app runs/refreshes. Hosting limitation: Streamlit Cloud sleeps when inactive, so active browser tab or manual/scheduled refresh is required for continuous monitoring.")
     if new_auto != auto_enabled:
         set_setting("auto_paper", "1" if new_auto else "0")
         st.rerun()
     st.button("🔄 Refresh market data", on_click=st.cache_data.clear, use_container_width=True)
-    st.caption("Forex market data may be delayed or temporarily unavailable.")
+    st.caption("Hosting note: Streamlit Cloud par background daemon service continuously run nahi hoti. Open trades ko monitor/close karne ke liye app ko refresh karna ya active rakhna zaroori hai.")
 
 balance = float(get_setting("virtual_balance", "10000") or 10000)
 data, fetch_error = fetch_candles(ticker, interval, period)
@@ -299,9 +327,21 @@ analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["📊 Analyzer", "�
 
 with analyzer_tab:
     st.subheader(f"{pair_label} · {timeframe_label}")
+    
+    # Check open trades across all symbols for time-based / SL-TP exits on page load/refresh
+    with db_connect() as con:
+        all_open_trades = con.execute("SELECT DISTINCT symbol FROM paper_trades WHERE status='OPEN'").fetchall()
+        for ot in all_open_trades:
+            sym = ot["symbol"]
+            sym_interval = timeframe_code if sym == ticker else "60m"
+            sym_period = period if sym == ticker else "1mo"
+            s_data, s_err = fetch_candles(sym, sym_interval, sym_period)
+            if not s_data.empty:
+                evaluate_and_close_trades(con, sym, s_data.iloc[-1])
+
     if fetch_error or data.empty:
         st.error(fetch_error or "Market data unavailable.")
-        st.info("Internet connection check karein, phir Refresh market data dabayein. Yahoo Finance kabhi-kabhi intraday data limit kar sakta hai.")
+        st.info("Internet connection check karein, phir Refresh market data dabayein. Fresh market data abhi unavailable ho sakta hai.")
     elif len(data) < 3:
         st.warning("Signal banane ke liye abhi candles kam hain. Baad mein refresh karein.")
     else:
@@ -311,10 +351,9 @@ with analyzer_tab:
         sell_votes = int((votes["Signal"] == "SELL").sum())
         signal = "BUY" if buy_votes >= vote_threshold else "SELL" if sell_votes >= vote_threshold else "WAIT"
         candle_time = pd.Timestamp(last["time"]).isoformat()
-        candle_key = f"{ticker}|{timeframe_code}|{candle_time}"
         processed = load_processed_candles()
         pair_time_key = f"{ticker}|{timeframe_code}"
-        already_processed = processed.get(pair_time_key) == candle_time
+        
         try:
             last_trade_candles = json.loads(get_setting("last_trade_candles", "{}"))
             if not isinstance(last_trade_candles, dict):
@@ -323,7 +362,7 @@ with analyzer_tab:
             last_trade_candles = {}
             
         with db_connect() as con:
-            closed_count = close_open_trades_on_candle(con, ticker, last)
+            closed_count = evaluate_and_close_trades(con, ticker, last)
             if new_auto:
                 if signal in ("BUY", "SELL"):
                     if last_trade_candles.get(pair_time_key) == candle_time:
@@ -341,18 +380,15 @@ with analyzer_tab:
             else:
                 st.caption("Auto Paper Trading OFF hai. Demo trade banane ke liye sidebar mein ise ON karein.")
                 
-            if not already_processed:
-                processed[pair_time_key] = candle_time
-                con_set_setting(con, "last_processed_candles", json.dumps(processed))
             if closed_count:
-                st.success(f"{closed_count} paper trade(s) closed based on the latest available candle.")
+                st.success(f"{closed_count} paper trade(s) closed based on SL/TP or 15-minute Time Exit.")
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Combined signal", signal)
         c2.metric("BUY votes", f"{buy_votes}/8")
         c3.metric("SELL votes", f"{sell_votes}/8")
         c4.metric("Latest close", f"{float(last['close']):.5f}")
-        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. Fast Mode mein false signals zyada ho sakte hain. Signal educational proxy hai, guaranteed prediction nahi.")
+        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. 15-minute maximum-duration time exit enabled. Signal educational proxy hai.")
 
         fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name="Candles")])
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
@@ -387,29 +423,44 @@ with library_tab:
 with paper_tab:
     st.subheader("Paper Trading Journal")
     with db_connect() as journal_con:
-        trades = pd.read_sql_query("SELECT id,created_at,symbol,timeframe,side,entry,stop,target,quantity,status,exit_price,pnl,exit_reason,strategy_note FROM paper_trades ORDER BY id DESC", journal_con)
+        trades = pd.read_sql_query("""
+            SELECT id AS 'Trade ID', 
+                   symbol AS 'Currency Pair', 
+                   side AS 'Side', 
+                   entry AS 'Entry Price', 
+                   created_at AS 'Entry Time', 
+                   stop AS 'Stop Loss', 
+                   target AS 'Take Profit', 
+                   exit_price AS 'Exit Price', 
+                   exit_time AS 'Exit Time', 
+                   duration AS 'Duration', 
+                   status AS 'Status', 
+                   pnl AS 'P/L ($)', 
+                   exit_reason AS 'Exit Reason' 
+            FROM paper_trades 
+            ORDER BY id DESC
+        """, journal_con)
     if trades.empty:
         st.info("Abhi koi paper trade nahi hai. Auto paper trading enable karne par qualifying signal par demo trade create ho sakta hai.")
     else:
-        closed_trades = trades[trades["status"] == "CLOSED"]
-        total_pnl = pd.to_numeric(closed_trades["pnl"], errors="coerce").fillna(0).sum()
+        closed_trades = trades[trades["Status"] == "CLOSED"]
+        total_pnl = pd.to_numeric(closed_trades["P/L ($)"], errors="coerce").fillna(0).sum()
         m1, m2, m3 = st.columns(3)
         m1.metric("Total paper trades", len(trades))
-        m2.metric("Open trades", int((trades["status"] == "OPEN").sum()))
+        m2.metric("Open trades", int((trades["Status"] == "OPEN").sum()))
         m3.metric("Closed P/L ($)", f"{total_pnl:.2f}")
         st.dataframe(trades, use_container_width=True, hide_index=True)
         st.download_button("Download trade journal CSV", trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades.csv", mime="text/csv")
-    st.caption("Trade exits sirf us symbol ko analyze/refresh karne par check hote hain.")
+    st.caption("Trade monitoring note: Har trade ki maximum duration 15 minutes hoti hai. SL/TP hit na hone par 15 minutes ke baad 'Time Exit' ke roop mein auto-close hoti hai jab app refresh/load hoti hai.")
 
 with setup_tab:
     st.subheader("Setup & Important Limits")
     st.markdown("""
-    - **Market data:** Yahoo Finance (`yfinance`); availability, delay aur limits badal sakte hain.
-    - **Strategies:** 8 simplified rule-based proxies.
-    - **Signal modes:** Safe Mode mein 5/8 votes; Fast Mode mein 3/8 votes.
-    - **Auto paper mode:** App run/refresh hone par hi evaluation hoti hai.
-    - **Storage:** SQLite file deployment environment par depend karti hai.
-    - **Trading:** Koi broker connected nahi hai.
+    - **15-Minute Max Duration:** Har paper trade ki maximum holding limit 15 minutes hai. Stop Loss ya Take Profit pehle hit na ho, toh 15 minutes ke baad trade latest market price par **Time Exit** ho jati hai.
+    - **Simultaneous Trades Limit:** Maximum **3 open paper trades** ek sath active ho sakti hain.
+    - **Hosting & Monitoring Limitation:** Streamlit Cloud par background daemons sleep mode mein chale jate hain jab app inactive ho. Isliye active monitoring ke liye app ko open/refresh karna zaroori hai. Background mein stop ya sleep hone par trades tab tak monitor nahi hoti jab tak app dobara active na ho.
+    - **Market Data:** Yahoo Finance (`yfinance`) data delay aur fresh data availability par dependent hai.
+    - **Storage & Locking:** SQLite database WAL/Timeout aur retry mechanism ke sath safe queries par chalta hai.
     """)
     if st.button("Clear cached market data"):
         st.cache_data.clear()
