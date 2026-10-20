@@ -10,7 +10,16 @@ import yfinance as yf
 
 APP_DIR = Path(__file__).parent
 # Streamlit Cloud source directory may be read-only; /tmp is writable but ephemeral.
-DB_PATH = Path("/tmp") / "big_man.db"
+# Prefer a persistent data folder when writable; fall back to /tmp on read-only hosts.
+DATA_DIR = APP_DIR / "data"
+try:
+    DATA_DIR.mkdir(exist_ok=True)
+    _probe = DATA_DIR / ".write_test"
+    _probe.write_text("ok", encoding="utf-8")
+    _probe.unlink(missing_ok=True)
+    DB_PATH = DATA_DIR / "big_man.db"
+except OSError:
+    DB_PATH = Path("/tmp") / "big_man.db"
 STRATEGIES_PATH = APP_DIR / "strategies.json"
 
 st.set_page_config(page_title="BIG MAN Forex AI", page_icon="📈", layout="wide")
@@ -120,7 +129,8 @@ def fetch_candles(ticker, interval, period):
             return pd.DataFrame(), f"Yahoo Finance ne {ticker} ke liye data nahi diya. Thodi der baad refresh karein."
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
-        raw = raw.rename(columns={str(c).lower(): str(c).lower() for c in raw.columns})
+        # Normalize provider column labels safely after flattening MultiIndex.
+        raw.columns = [str(c).strip() for c in raw.columns]
         required = ["Open", "High", "Low", "Close"]
         missing = [col for col in required if col not in raw.columns]
         if missing:
@@ -184,7 +194,18 @@ def close_open_trades_on_candle(con, symbol, last_candle):
     trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
     closed = 0
     hi, lo = float(last_candle["high"]), float(last_candle["low"])
+    candle_time = pd.Timestamp(last_candle["time"])
     for trade in trades:
+        # A trade created at this candle's close must not be exited using that
+        # same candle's earlier high/low (look-ahead bias). Wait for a later candle.
+        try:
+            created_time = pd.Timestamp(trade["created_at"])
+            if created_time.tzinfo is None:
+                created_time = created_time.tz_localize("UTC")
+            if created_time >= candle_time:
+                continue
+        except (TypeError, ValueError):
+            continue
         side = trade["side"]
         stop, target, entry, qty = float(trade["stop"]), float(trade["target"]), float(trade["entry"]), float(trade["quantity"])
         exit_price, reason = None, None
@@ -366,7 +387,7 @@ with paper_tab:
         m3.metric("Closed P/L ($)", f"{total_pnl:.2f}")
         st.dataframe(trades, use_container_width=True, hide_index=True)
         st.download_button("Download trade journal CSV", trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades.csv", mime="text/csv")
-    st.caption("Trade exits sirf us symbol ko analyze/refresh karne par check hote hain. App continuously background mein nahi chalta.")
+    st.caption("Trade exits sirf us symbol ko analyze/refresh karne par check hote hain. App continuously background mein nahi chalta. Deployment host agar local files reset kare, journal persist rehne ki guarantee nahi.")
 
 with setup_tab:
     st.subheader("Setup & Important Limits")
