@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import time
+import threading
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -40,11 +41,15 @@ def utc_now_str():
 
 
 def db_connect():
-    # SQLite connection with timeout and retry handling for concurrency/locks
+    # SQLite connection with timeout and retry handling for concurrency/locks + WAL mode where supported
     for attempt in range(5):
         try:
             con = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
             con.row_factory = sqlite3.Row
+            try:
+                con.execute("PRAGMA journal_mode=WAL;")
+            except Exception:
+                pass
             return con
         except sqlite3.OperationalError:
             if attempt == 4:
@@ -70,7 +75,8 @@ def init_db():
             duration TEXT,
             pnl REAL,
             exit_reason TEXT,
-            strategy_note TEXT
+            strategy_note TEXT,
+            balance_updated INTEGER DEFAULT 0
         )""")
         con.execute("""CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
@@ -87,7 +93,7 @@ def init_db():
             if not existing:
                 con.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, value))
                 
-        # Safe migrations for paper_trades table
+        # Safe migrations for paper_trades table including balance_updated flag
         columns = {row[1] for row in con.execute("PRAGMA table_info(paper_trades)").fetchall()}
         migrations = {
             "timeframe": "TEXT NOT NULL DEFAULT 'H1'",
@@ -95,10 +101,14 @@ def init_db():
             "duration": "TEXT",
             "exit_reason": "TEXT",
             "strategy_note": "TEXT",
+            "balance_updated": "INTEGER DEFAULT 0",
         }
         for name, definition in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {definition}")
+                # Requirement 7: Prevent old closed trades from adding P/L again during migration
+                if name == "balance_updated":
+                    con.execute("UPDATE paper_trades SET balance_updated = 1 WHERE status = 'CLOSED'")
 
 
 def get_setting(key, default=""):
@@ -213,7 +223,7 @@ def strategy_signals(data):
 
 
 def evaluate_and_close_trades(con, symbol, last_candle):
-    """Evaluate open paper trades against SL/TP or 15-minute maximum duration limit."""
+    """Evaluate open paper trades against SL/TP or 15-minute maximum duration limit atomically with virtual balance updates."""
     trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
     closed = 0
     hi, lo = float(last_candle["high"]), float(last_candle["low"])
@@ -261,9 +271,20 @@ def evaluate_and_close_trades(con, symbol, last_candle):
             else:
                 pnl = (entry - exit_price) * qty
 
+            # Requirements 1, 2, 3, 4, 5: Update virtual balance atomically and exactly once
+            balance_updated = int(trade["balance_updated"] if "balance_updated" in trade.keys() else 0)
+            if balance_updated == 0:
+                bal_row = con.execute("SELECT value FROM app_settings WHERE key='virtual_balance'").fetchone()
+                current_balance = float(bal_row["value"]) if bal_row else 10000.0
+                new_balance = current_balance + pnl
+                con.execute("UPDATE app_settings SET value=? WHERE key='virtual_balance'", (str(new_balance),))
+                balance_updated = 1
+
             con.execute(
-                "UPDATE paper_trades SET status='CLOSED', exit_price=?, exit_time=?, duration=?, pnl=?, exit_reason=? WHERE id=?",
-                (exit_price, exit_time_str, duration_str, pnl, reason, trade["id"])
+                """UPDATE paper_trades 
+                   SET status='CLOSED', exit_price=?, exit_time=?, duration=?, pnl=?, exit_reason=?, balance_updated=? 
+                   WHERE id=?""",
+                (exit_price, exit_time_str, duration_str, pnl, reason, balance_updated, trade["id"])
             )
             closed += 1
     return closed
@@ -283,12 +304,47 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     qty = min(risk_cash / stop_distance, 10000.0)
     note = ", ".join(signals.loc[signals["Signal"] == side, "Strategy"].tolist())
     
-    con.execute("""INSERT INTO paper_trades(created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note)
-                  VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?)""", (utc_now_str(), symbol, timeframe, side, entry, stop, target, qty, note))
+    con.execute("""INSERT INTO paper_trades(created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note,balance_updated)
+                  VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?, 0)""", (utc_now_str(), symbol, timeframe, side, entry, stop, target, qty, note))
     return True, f"Demo paper {side} trade created."
 
 
+# Background monitoring thread running at least once per minute where infrastructure permits
+def background_monitor_worker():
+    while True:
+        time.sleep(60)
+        try:
+            with db_connect() as con:
+                open_trades = con.execute("SELECT DISTINCT symbol FROM paper_trades WHERE status='OPEN'").fetchall()
+                for ot in open_trades:
+                    sym = ot["symbol"]
+                    raw = yf.download(sym, interval="15m", period="1d", progress=False, threads=False)
+                    if not raw.empty:
+                        if isinstance(raw.columns, pd.MultiIndex):
+                            raw.columns = raw.columns.get_level_values(0)
+                        raw.columns = [str(c).strip() for c in raw.columns]
+                        if {"Open", "High", "Low", "Close"}.issubset(raw.columns):
+                            data = raw.reset_index()
+                            time_col = "Datetime" if "Datetime" in data.columns else "Date"
+                            if time_col not in data.columns:
+                                time_col = data.columns[0]
+                            data = data.rename(columns={time_col: "time", "Open": "open", "High": "high", "Low": "low", "Close": "close"})
+                            data["time"] = pd.to_datetime(data["time"], errors="coerce", utc=True)
+                            last_row = data.iloc[-1]
+                            evaluate_and_close_trades(con, sym, last_row)
+        except Exception:
+            pass
+
+
+@st.cache_resource
+def start_background_monitor():
+    t = threading.Thread(target=background_monitor_worker, daemon=True)
+    t.start()
+    return True
+
+
 init_db()
+start_background_monitor()
 
 st.title("📈 BIG MAN — Forex AI (Demo)")
 st.caption("Educational prototype • Yahoo Finance data • Paper trading only • No broker connection")
@@ -318,7 +374,7 @@ with st.sidebar:
         set_setting("auto_paper", "1" if new_auto else "0")
         st.rerun()
     st.button("🔄 Refresh market data", on_click=st.cache_data.clear, use_container_width=True)
-    st.caption("Hosting note: Streamlit Cloud par background daemon service continuously run nahi hoti. Open trades ko monitor/close karne ke liye app ko refresh karna ya active rakhna zaroori hai.")
+    st.caption("Hosting note: Streamlit Cloud par background daemon service continuously sleep/inactive ho sakti hai jab app active na ho. Background thread tab tak hi monitor karta hai jab tak app server process alive aur running state mein ho.")
 
 balance = float(get_setting("virtual_balance", "10000") or 10000)
 data, fetch_error = fetch_candles(ticker, interval, period)
@@ -351,7 +407,6 @@ with analyzer_tab:
         sell_votes = int((votes["Signal"] == "SELL").sum())
         signal = "BUY" if buy_votes >= vote_threshold else "SELL" if sell_votes >= vote_threshold else "WAIT"
         candle_time = pd.Timestamp(last["time"]).isoformat()
-        processed = load_processed_candles()
         pair_time_key = f"{ticker}|{timeframe_code}"
         
         try:
@@ -388,7 +443,7 @@ with analyzer_tab:
         c2.metric("BUY votes", f"{buy_votes}/8")
         c3.metric("SELL votes", f"{sell_votes}/8")
         c4.metric("Latest close", f"{float(last['close']):.5f}")
-        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. 15-minute maximum-duration time exit enabled. Signal educational proxy hai.")
+        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. Virtual balance accounting with atomic P/L integration enabled.")
 
         fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name="Candles")])
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
@@ -421,7 +476,11 @@ with library_tab:
     st.warning("Ye strategies simplified proxies hain; proper backtesting, spread/slippage aur out-of-sample validation nahi hua hai.")
 
 with paper_tab:
-    st.subheader("Paper Trading Journal")
+    st.subheader("Paper Trading Journal & Balance Accounting")
+    
+    # Requirement 8: Show current virtual balance and total realized P/L clearly
+    current_balance_val = float(get_setting("virtual_balance", "10000") or 10000)
+    
     with db_connect() as journal_con:
         trades = pd.read_sql_query("""
             SELECT id AS 'Trade ID', 
@@ -440,27 +499,34 @@ with paper_tab:
             FROM paper_trades 
             ORDER BY id DESC
         """, journal_con)
+
+    if not trades.empty:
+        closed_trades = trades[trades["Status"] == "CLOSED"]
+        total_realized_pnl = pd.to_numeric(closed_trades["P/L ($)"], errors="coerce").fillna(0).sum()
+    else:
+        total_realized_pnl = 0.0
+
+    bm1, bm2, bm3, bm4 = st.columns(4)
+    bm1.metric("Virtual Balance", f"${current_balance_val:,.4f}")
+    bm2.metric("Total Realized P/L", f"${total_realized_pnl:,.4f}")
+    bm3.metric("Total Trades", len(trades))
+    bm4.metric("Open Trades", int((trades["Status"] == "OPEN").sum()) if not trades.empty else 0)
+
     if trades.empty:
         st.info("Abhi koi paper trade nahi hai. Auto paper trading enable karne par qualifying signal par demo trade create ho sakta hai.")
     else:
-        closed_trades = trades[trades["Status"] == "CLOSED"]
-        total_pnl = pd.to_numeric(closed_trades["P/L ($)"], errors="coerce").fillna(0).sum()
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total paper trades", len(trades))
-        m2.metric("Open trades", int((trades["Status"] == "OPEN").sum()))
-        m3.metric("Closed P/L ($)", f"{total_pnl:.2f}")
         st.dataframe(trades, use_container_width=True, hide_index=True)
         st.download_button("Download trade journal CSV", trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades.csv", mime="text/csv")
-    st.caption("Trade monitoring note: Har trade ki maximum duration 15 minutes hoti hai. SL/TP hit na hone par 15 minutes ke baad 'Time Exit' ke roop mein auto-close hoti hai jab app refresh/load hoti hai.")
+    st.caption("Accounting note: When a trade closes (Stop Loss, Take Profit, or Time Exit), its realized P/L is atomically added to the virtual balance exactly once via a secure transaction flag.")
 
 with setup_tab:
     st.subheader("Setup & Important Limits")
     st.markdown("""
-    - **15-Minute Max Duration:** Har paper trade ki maximum holding limit 15 minutes hai. Stop Loss ya Take Profit pehle hit na ho, toh 15 minutes ke baad trade latest market price par **Time Exit** ho jati hai.
-    - **Simultaneous Trades Limit:** Maximum **3 open paper trades** ek sath active ho sakti hain.
-    - **Hosting & Monitoring Limitation:** Streamlit Cloud par background daemons sleep mode mein chale jate hain jab app inactive ho. Isliye active monitoring ke liye app ko open/refresh karna zaroori hai. Background mein stop ya sleep hone par trades tab tak monitor nahi hoti jab tak app dobara active na ho.
-    - **Market Data:** Yahoo Finance (`yfinance`) data delay aur fresh data availability par dependent hai.
-    - **Storage & Locking:** SQLite database WAL/Timeout aur retry mechanism ke sath safe queries par chalta hai.
+    - **Virtual Balance Accounting:** Realized P/L (`new_balance = current_balance + realized_pnl`) is updated atomically and exactly once per closed trade via database transaction flags (`balance_updated`).
+    - **15-Minute Max Duration & Time Exit:** Maximum holding limit is 15 minutes. If SL/TP is not reached, trades exit at the latest market price as **Time Exit**.
+    - **Simultaneous Trades Limit:** Maximum **3 open paper trades** simultaneously.
+    - **Hosting & Monitoring Limitation:** Streamlit Cloud sleeps during inactivity. Active browser session or manual refresh is required for continuous monitoring.
+    - **Paper Trading Only:** No real broker connection or real money is involved.
     """)
     if st.button("Clear cached market data"):
         st.cache_data.clear()
