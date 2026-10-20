@@ -63,6 +63,7 @@ def init_db():
             "auto_paper": "0",
             # Store last processed candle per symbol+timeframe, not globally.
             "last_processed_candles": "{}",
+            "last_trade_candles": "{}",
         }
         for key, value in defaults.items():
             con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES(?,?)", (key, value))
@@ -276,15 +277,38 @@ with analyzer_tab:
         candle_time = pd.Timestamp(last["time"]).isoformat()
         candle_key = f"{ticker}|{timeframe_code}|{candle_time}"
         processed = load_processed_candles()
-        already_processed = processed.get(f"{ticker}|{timeframe_code}") == candle_time
+        pair_time_key = f"{ticker}|{timeframe_code}"
+        already_processed = processed.get(pair_time_key) == candle_time
+        try:
+            last_trade_candles = json.loads(get_setting("last_trade_candles", "{}"))
+            if not isinstance(last_trade_candles, dict):
+                last_trade_candles = {}
+        except (TypeError, json.JSONDecodeError):
+            last_trade_candles = {}
+        # Exits are checked whenever this pair is analyzed/refreshed.
         closed_count = close_open_trades_on_candle(con, ticker, last)
-        if new_auto and not already_processed:
+        if new_auto:
             if signal in ("BUY", "SELL"):
-                made, msg = create_auto_trade(con, ticker, timeframe_code, signal, last, atr, balance, votes)
-                st.info(msg)
+                # Do not let an earlier WAIT on this candle block a later qualifying signal.
+                # Record the candle only after a trade is successfully inserted.
+                if last_trade_candles.get(pair_time_key) == candle_time:
+                    st.info("Is candle par demo trade pehle hi create ho chuka hai; duplicate trade nahi banaya.")
+                else:
+                    made, msg = create_auto_trade(con, ticker, timeframe_code, signal, last, atr, balance, votes)
+                    if made:
+                        last_trade_candles[pair_time_key] = candle_time
+                        set_setting("last_trade_candles", json.dumps(last_trade_candles))
+                        st.success(msg)
+                    else:
+                        st.warning(f"Demo trade create nahi hua: {msg}")
             else:
                 st.caption("Signal WAIT hai, isliye naya paper trade nahi bana.")
-            processed[f"{ticker}|{timeframe_code}"] = candle_time
+        else:
+            st.caption("Auto Paper Trading OFF hai. Demo trade banane ke liye sidebar mein ise ON karein.")
+        # Keep the legacy processed-candle record for compatibility, but it no longer
+        # blocks a qualifying signal from creating a trade later in the same candle.
+        if not already_processed:
+            processed[pair_time_key] = candle_time
             set_setting("last_processed_candles", json.dumps(processed))
         if closed_count:
             st.success(f"{closed_count} paper trade(s) closed based on the latest available candle.")
