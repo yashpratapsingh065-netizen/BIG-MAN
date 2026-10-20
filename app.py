@@ -9,6 +9,8 @@ import plotly.graph_objects as go
 import yfinance as yf
 
 APP_DIR = Path(__file__).parent
+# Streamlit Cloud source directory may be read-only; /tmp is writable but ephemeral.
+# Prefer a persistent data folder when writable; fall back to /tmp on read-only hosts.
 DATA_DIR = APP_DIR / "data"
 try:
     DATA_DIR.mkdir(exist_ok=True)
@@ -20,7 +22,7 @@ except OSError:
     DB_PATH = Path("/tmp") / "big_man.db"
 STRATEGIES_PATH = APP_DIR / "strategies.json"
 
-st.set_page_config(page_title="BIG MAN Forex AI", page_icon="ðŸ“ˆ", layout="wide")
+st.set_page_config(page_title="BIG MAN Forex AI", page_icon="📈", layout="wide")
 
 PAIRS = {
     "EUR/USD": "EURUSD=X",
@@ -39,13 +41,22 @@ def utc_now():
 
 
 def db_connect():
-    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # Wait for concurrent Streamlit reruns instead of failing immediately.
+    con = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA busy_timeout=30000")
+    con.execute("PRAGMA synchronous=NORMAL")
     return con
 
 
 def init_db():
+    # WAL improves concurrent reads/writes. Set it during initialization only,
+    # not on every connection, because changing journal mode can itself lock.
     with db_connect() as con:
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass  # busy_timeout above will wait; app can still use SQLite defaults
         con.execute("""CREATE TABLE IF NOT EXISTS paper_trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT NOT NULL,
@@ -69,14 +80,13 @@ def init_db():
         defaults = {
             "virtual_balance": "10000",
             "auto_paper": "0",
+            # Store last processed candle per symbol+timeframe, not globally.
             "last_processed_candles": "{}",
             "last_trade_candles": "{}",
         }
         for key, value in defaults.items():
-            existing = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
-            if not existing:
-                con.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, value))
-                
+            con.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES(?,?)", (key, value))
+        # Safe migration for an older database.
         columns = {row[1] for row in con.execute("PRAGMA table_info(paper_trades)").fetchall()}
         migrations = {
             "timeframe": "TEXT NOT NULL DEFAULT 'H1'",
@@ -86,35 +96,42 @@ def init_db():
         for name, definition in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {definition}")
-                
-        try:
-            old = con.execute("SELECT value FROM app_settings WHERE key='last_processed_candle'").fetchone()
-            new = con.execute("SELECT value FROM app_settings WHERE key='last_processed_candles'").fetchone()
-            if old and new and new[0] == "{}" and old[0]:
-                con.execute("UPDATE app_settings SET value=? WHERE key='last_processed_candles'", (json.dumps({"legacy": old[0]}),))
-        except Exception:
-            pass
+        # Upgrade the older single-candle setting without losing it.
+        old = con.execute("SELECT value FROM app_settings WHERE key='last_processed_candle'").fetchone()
+        new = con.execute("SELECT value FROM app_settings WHERE key='last_processed_candles'").fetchone()
+        if old and new and new[0] == "{}" and old[0]:
+            con.execute("UPDATE app_settings SET value=? WHERE key='last_processed_candles'", (json.dumps({"legacy": old[0]}),))
 
 
 def get_setting(key, default=""):
-    try:
-        with db_connect() as con:
-            row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
-        return row[0] if row else default
-    except Exception:
-        return default
+    with db_connect() as con:
+        row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
 
 
 def set_setting(key, value):
-    try:
-        with db_connect() as con:
-            existing = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
-            if existing:
-                con.execute("UPDATE app_settings SET value=? WHERE key=?", (str(value), key))
-            else:
-                con.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, str(value)))
-    except Exception as exc:
-        st.warning(f"Setting save nahi ho saki: {exc}")
+    # Atomic upsert avoids the SELECT-then-INSERT race between Streamlit reruns.
+    last_error = None
+    for attempt in range(3):
+        try:
+            with db_connect() as con:
+                con.execute(
+                    "INSERT INTO app_settings(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, str(value)),
+                )
+            return True
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                break
+            import time
+            time.sleep(0.25 * (attempt + 1))
+        except sqlite3.Error as exc:
+            last_error = exc
+            break
+    st.warning(f"Setting save nahi ho saki: {last_error}")
+    return False
 
 
 def load_processed_candles():
@@ -127,6 +144,7 @@ def load_processed_candles():
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_candles(ticker, interval, period):
+    """Fetch recent market data. Errors are returned to the UI, not silently hidden."""
     try:
         raw = yf.download(
             ticker,
@@ -140,6 +158,7 @@ def fetch_candles(ticker, interval, period):
             return pd.DataFrame(), f"Yahoo Finance ne {ticker} ke liye data nahi diya. Thodi der baad refresh karein."
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
+        # Normalize provider column labels safely after flattening MultiIndex.
         raw.columns = [str(c).strip() for c in raw.columns]
         required = ["Open", "High", "Low", "Close"]
         missing = [col for col in required if col not in raw.columns]
@@ -186,7 +205,7 @@ def strategy_signals(data):
     add("Support / Resistance", "BUY" if close > prior_low + (prior_high-prior_low)*0.65 else "SELL" if close < prior_low + (prior_high-prior_low)*0.35 else "WAIT", "Price position inside recent 20-candle range")
     fib_low = prior_low + (prior_high-prior_low)*0.382
     fib_high = prior_low + (prior_high-prior_low)*0.618
-    add("Fibonacci Zone (proxy)", "BUY" if close > fib_high else "SELL" if close < fib_low else "WAIT", "Simple 38.2%â€“61.8% range proxy; not a full Fibonacci setup")
+    add("Fibonacci Zone (proxy)", "BUY" if close > fib_high else "SELL" if close < fib_low else "WAIT", "Simple 38.2%–61.8% range proxy; not a full Fibonacci setup")
     add("Breakout", "BUY" if close > prior_high else "SELL" if close < prior_low else "WAIT", "Close compared with previous range; levels exclude current candle")
     broke_up = float(prev["close"]) > prior_high if pd.notna(last["prior_high"]) else False
     broke_dn = float(prev["close"]) < prior_low if pd.notna(last["prior_low"]) else False
@@ -200,11 +219,14 @@ def strategy_signals(data):
 
 
 def close_open_trades_on_candle(con, symbol, last_candle):
+    """Evaluate every open paper trade against the currently available candle for its symbol only."""
     trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
     closed = 0
     hi, lo = float(last_candle["high"]), float(last_candle["low"])
     candle_time = pd.Timestamp(last_candle["time"])
     for trade in trades:
+        # A trade created at this candle's close must not be exited using that
+        # same candle's earlier high/low (look-ahead bias). Wait for a later candle.
         try:
             created_time = pd.Timestamp(trade["created_at"])
             if created_time.tzinfo is None:
@@ -216,6 +238,7 @@ def close_open_trades_on_candle(con, symbol, last_candle):
         side = trade["side"]
         stop, target, entry, qty = float(trade["stop"]), float(trade["target"]), float(trade["entry"]), float(trade["quantity"])
         exit_price, reason = None, None
+        # Conservative assumption: if both are touched within one candle, stop-loss is hit first.
         if side == "BUY":
             if lo <= stop:
                 exit_price, reason = stop, "Stop Loss"
@@ -235,6 +258,7 @@ def close_open_trades_on_candle(con, symbol, last_candle):
 
 
 def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, signals):
+    # Keep one open trade total, to make the demo risk easier to understand.
     open_count = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'").fetchone()[0]
     if open_count:
         return False, "Pehle se ek open paper trade hai; naya trade nahi banaya."
@@ -252,8 +276,8 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
 
 init_db()
 
-st.title("ðŸ“ˆ BIG MAN â€” Forex AI (Demo)")
-st.caption("Educational prototype â€¢ Yahoo Finance data â€¢ Paper trading only â€¢ No broker connection")
+st.title("📈 BIG MAN — Forex AI (Demo)")
+st.caption("Educational prototype • Yahoo Finance data • Paper trading only • No broker connection")
 
 with st.sidebar:
     st.header("Settings")
@@ -279,17 +303,17 @@ with st.sidebar:
     if new_auto != auto_enabled:
         set_setting("auto_paper", "1" if new_auto else "0")
         st.rerun()
-    st.button("ðŸ”„ Refresh market data", on_click=st.cache_data.clear, use_container_width=True)
+    st.button("🔄 Refresh market data", on_click=st.cache_data.clear, use_container_width=True)
     st.caption("Forex market data may be delayed or temporarily unavailable.")
 
 balance = float(get_setting("virtual_balance", "10000") or 10000)
 con = db_connect()
 data, fetch_error = fetch_candles(ticker, interval, period)
 
-analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["ðŸ“Š Analyzer", "ðŸ§  Strategy Library", "ðŸ§¾ Paper Trading", "âš™ï¸ Setup & Limits"])
+analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["📊 Analyzer", "🧠 Strategy Library", "🧾 Paper Trading", "⚙️ Setup & Limits"])
 
 with analyzer_tab:
-    st.subheader(f"{pair_label} Â· {timeframe_label}")
+    st.subheader(f"{pair_label} · {timeframe_label}")
     if fetch_error or data.empty:
         st.error(fetch_error or "Market data unavailable.")
         st.info("Internet connection check karein, phir Refresh market data dabayein. Yahoo Finance kabhi-kabhi intraday data limit kar sakta hai.")
@@ -312,10 +336,12 @@ with analyzer_tab:
                 last_trade_candles = {}
         except (TypeError, json.JSONDecodeError):
             last_trade_candles = {}
-            
+        # Exits are checked whenever this pair is analyzed/refreshed.
         closed_count = close_open_trades_on_candle(con, ticker, last)
         if new_auto:
             if signal in ("BUY", "SELL"):
+                # Do not let an earlier WAIT on this candle block a later qualifying signal.
+                # Record the candle only after a trade is successfully inserted.
                 if last_trade_candles.get(pair_time_key) == candle_time:
                     st.info("Is candle par demo trade pehle hi create ho chuka hai; duplicate trade nahi banaya.")
                 else:
@@ -330,7 +356,8 @@ with analyzer_tab:
                 st.caption("Signal WAIT hai, isliye naya paper trade nahi bana.")
         else:
             st.caption("Auto Paper Trading OFF hai. Demo trade banane ke liye sidebar mein ise ON karein.")
-            
+        # Keep the legacy processed-candle record for compatibility, but it no longer
+        # blocks a qualifying signal from creating a trade later in the same candle.
         if not already_processed:
             processed[pair_time_key] = candle_time
             set_setting("last_processed_candles", json.dumps(processed))
@@ -342,7 +369,7 @@ with analyzer_tab:
         c2.metric("BUY votes", f"{buy_votes}/8")
         c3.metric("SELL votes", f"{sell_votes}/8")
         c4.metric("Latest close", f"{float(last['close']):.5f}")
-        st.caption(f"Mode: {signal_mode} Â· Signal threshold: {vote_threshold}/8 votes. Fast Mode mein false signals zyada ho sakte hain. Signal educational proxy hai, guaranteed prediction nahi.")
+        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. Fast Mode mein false signals zyada ho sakte hain. Signal educational proxy hai, guaranteed prediction nahi. Latest Yahoo candle abhi forming ho sakti hai; ise confirmed closed-candle signal na samjhein.")
 
         fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name="Candles")])
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
@@ -364,7 +391,7 @@ with library_tab:
         st.info("strategies.json file nahi mili. Neeche app ke 8 built-in educational proxy strategies hain.")
         st.dataframe(pd.DataFrame([
             {"Strategy": "Support / Resistance", "Purpose": "Recent range mein price location"},
-            {"Strategy": "Fibonacci Zone (proxy)", "Purpose": "38.2%â€“61.8% range zone"},
+            {"Strategy": "Fibonacci Zone (proxy)", "Purpose": "38.2%–61.8% range zone"},
             {"Strategy": "Breakout", "Purpose": "Previous range high/low break"},
             {"Strategy": "Fake Breakout (proxy)", "Purpose": "Possible failed breakout"},
             {"Strategy": "Trend Alignment", "Purpose": "SMA20/SMA50 trend filter"},
@@ -389,17 +416,18 @@ with paper_tab:
         m3.metric("Closed P/L ($)", f"{total_pnl:.2f}")
         st.dataframe(trades, use_container_width=True, hide_index=True)
         st.download_button("Download trade journal CSV", trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades.csv", mime="text/csv")
-    st.caption("Trade exits sirf us symbol ko analyze/refresh karne par check hote hain.")
+    st.caption("Trade exits sirf us symbol ko analyze/refresh karne par check hote hain. App continuously background mein nahi chalta. Deployment host agar local files reset kare, journal persist rehne ki guarantee nahi.")
 
 with setup_tab:
     st.subheader("Setup & Important Limits")
     st.markdown("""
     - **Market data:** Yahoo Finance (`yfinance`); availability, delay aur limits badal sakte hain.
-    - **Strategies:** 8 simplified rule-based proxies.
-    - **Signal modes:** Safe Mode mein 5/8 votes; Fast Mode mein 3/8 votes.
-    - **Auto paper mode:** App run/refresh hone par hi evaluation hoti hai.
-    - **Storage:** SQLite file deployment environment par depend karti hai.
-    - **Trading:** Koi broker connected nahi hai.
+    - **Strategies:** 8 simplified rule-based proxies; inhe validated AI model ya profitable system na samjhein.
+    - **Signal modes:** Safe Mode mein 5/8 votes chahiye; Fast Mode mein 3/8 votes. Fast Mode zyada signals de sakta hai, par false signals ka risk bhi zyada hai.
+    - **Auto paper mode:** App run/refresh hone par hi evaluation hoti hai; 24/7 background service nahi.
+    - **Risk model:** Demo trade mein nominal stop distance aur virtual balance ka 0.5% risk budget use hota hai. Forex contract sizing, pip value, spread, commission aur slippage ka exact broker model nahi hai.
+    - **Storage:** SQLite file deployment environment par depend karti hai; Streamlit redeploy/restart ke baad data persist rehne ki guarantee nahi.
+    - **Trading:** Koi broker connected nahi hai. Ye app real orders place nahi karti. Real money use karne se pehle independent testing aur financial advice zaroori hai.
     """)
     if st.button("Clear cached market data"):
         st.cache_data.clear()
