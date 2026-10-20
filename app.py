@@ -231,6 +231,13 @@ with st.sidebar:
     st.header("Settings")
     pair_label = st.selectbox("Currency pair", list(PAIRS.keys()))
     timeframe_label = st.selectbox("Timeframe", list(TIMEFRAMES.keys()))
+    signal_mode = st.selectbox(
+        "Signal mode",
+        ["Safe Mode", "Fast Mode"],
+        index=0,
+        help="Safe Mode: 5/8 votes. Fast Mode: 3/8 votes, signals zyada aa sakte hain lekin false signals bhi badhenge.",
+    )
+    vote_threshold = 5 if signal_mode == "Safe Mode" else 3
     ticker = PAIRS[pair_label]
     interval, period = TIMEFRAMES[timeframe_label]
     timeframe_code = interval
@@ -265,7 +272,7 @@ with analyzer_tab:
         last = analyzed.iloc[-1]
         buy_votes = int((votes["Signal"] == "BUY").sum())
         sell_votes = int((votes["Signal"] == "SELL").sum())
-        signal = "BUY" if buy_votes >= 5 else "SELL" if sell_votes >= 5 else "WAIT"
+        signal = "BUY" if buy_votes >= vote_threshold else "SELL" if sell_votes >= vote_threshold else "WAIT"
         candle_time = pd.Timestamp(last["time"]).isoformat()
         candle_key = f"{ticker}|{timeframe_code}|{candle_time}"
         processed = load_processed_candles()
@@ -287,7 +294,7 @@ with analyzer_tab:
         c2.metric("BUY votes", f"{buy_votes}/8")
         c3.metric("SELL votes", f"{sell_votes}/8")
         c4.metric("Latest close", f"{float(last['close']):.5f}")
-        st.caption("Signal educational proxy hai, guaranteed prediction nahi. Latest Yahoo candle abhi forming ho sakti hai; ise confirmed closed-candle signal na samjhein.")
+        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. Fast Mode mein false signals zyada ho sakte hain. Signal educational proxy hai, guaranteed prediction nahi. Latest Yahoo candle abhi forming ho sakti hai; ise confirmed closed-candle signal na samjhein.")
 
         fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name="Candles")])
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
@@ -341,6 +348,7 @@ with setup_tab:
     st.markdown("""
     - **Market data:** Yahoo Finance (`yfinance`); availability, delay aur limits badal sakte hain.
     - **Strategies:** 8 simplified rule-based proxies; inhe validated AI model ya profitable system na samjhein.
+    - **Signal modes:** Safe Mode mein 5/8 votes chahiye; Fast Mode mein 3/8 votes. Fast Mode zyada signals de sakta hai, par false signals ka risk bhi zyada hai.
     - **Auto paper mode:** App run/refresh hone par hi evaluation hoti hai; 24/7 background service nahi.
     - **Risk model:** Demo trade mein nominal stop distance aur virtual balance ka 0.5% risk budget use hota hai. Forex contract sizing, pip value, spread, commission aur slippage ka exact broker model nahi hai.
     - **Storage:** SQLite file deployment environment par depend karti hai; Streamlit redeploy/restart ke baad data persist rehne ki guarantee nahi.
