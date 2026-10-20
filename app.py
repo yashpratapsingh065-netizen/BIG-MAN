@@ -9,7 +9,8 @@ import plotly.graph_objects as go
 import yfinance as yf
 
 APP_DIR = Path(__file__).parent
-DB_PATH = APP_DIR / "big_man.db"
+# Streamlit Cloud source directory may be read-only; /tmp is writable but ephemeral.
+DB_PATH = Path("/tmp") / "big_man.db"
 STRATEGIES_PATH = APP_DIR / "strategies.json"
 
 st.set_page_config(page_title="BIG MAN Forex AI", page_icon="📈", layout="wide")
