@@ -106,7 +106,6 @@ def init_db():
         for name, definition in migrations.items():
             if name not in columns:
                 con.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {definition}")
-                # Requirement 7: Prevent old closed trades from adding P/L again during migration
                 if name == "balance_updated":
                     con.execute("UPDATE paper_trades SET balance_updated = 1 WHERE status = 'CLOSED'")
 
@@ -184,6 +183,33 @@ def fetch_candles(ticker, interval, period):
         return pd.DataFrame(), f"Market data fetch error (Fresh market data unavailable): {type(exc).__name__}: {exc}"
 
 
+def fetch_fresh_exit_candle(symbol):
+    """Fetch the latest valid market price specifically for time-based trade exits."""
+    try:
+        raw = yf.download(symbol, interval="1m", period="1d", auto_adjust=False, progress=False, threads=False)
+        if raw is None or raw.empty:
+            raw = yf.download(symbol, interval="15m", period="5d", auto_adjust=False, progress=False, threads=False)
+        if raw is None or raw.empty:
+            return None, "Fresh market data unavailable"
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        raw.columns = [str(c).strip() for c in raw.columns]
+        if not {"Open", "High", "Low", "Close"}.issubset(raw.columns):
+            return None, "Missing price columns"
+        data = raw.reset_index()
+        time_col = "Datetime" if "Datetime" in data.columns else "Date"
+        if time_col not in data.columns:
+            time_col = data.columns[0]
+        data = data.rename(columns={time_col: "time", "Close": "close", "High": "high", "Low": "low", "Open": "open"})
+        data["time"] = pd.to_datetime(data["time"], errors="coerce", utc=True)
+        data = data.dropna(subset=["time", "close"]).sort_values("time")
+        if data.empty:
+            return None, "No valid price records"
+        return data.iloc[-1], None
+    except Exception as exc:
+        return None, str(exc)
+
+
 def strategy_signals(data):
     df = data.copy()
     df["sma20"] = df["close"].rolling(20, min_periods=5).mean()
@@ -223,11 +249,10 @@ def strategy_signals(data):
 
 
 def evaluate_and_close_trades(con, symbol, last_candle):
-    """Evaluate open paper trades against SL/TP or 15-minute maximum duration limit atomically with virtual balance updates."""
+    """Evaluate open paper trades against SL/TP or robust 15-minute Time Exit with fresh market price verification."""
     trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
     closed = 0
     hi, lo = float(last_candle["high"]), float(last_candle["low"])
-    current_close = float(last_candle["close"])
     now_utc = datetime.now(timezone.utc)
     
     for trade in trades:
@@ -242,7 +267,7 @@ def evaluate_and_close_trades(con, symbol, last_candle):
         stop, target, entry, qty = float(trade["stop"]), float(trade["target"]), float(trade["entry"]), float(trade["quantity"])
         exit_price, reason = None, None
 
-        # 1. Check Stop Loss / Take Profit first
+        # 1. Check Stop Loss / Take Profit first using current candle high/low
         if side == "BUY":
             if lo <= stop:
                 exit_price, reason = stop, "Stop Loss"
@@ -257,7 +282,15 @@ def evaluate_and_close_trades(con, symbol, last_candle):
         # 2. Check 15-minute maximum duration time exit
         elapsed_minutes = (now_utc - created_time.to_pydatetime()).total_seconds() / 60.0
         if exit_price is None and elapsed_minutes >= 15.0:
-            exit_price, reason = current_close, "Time Exit"
+            # Fetch fresh market price specifically for time exit
+            fresh_candle, err = fetch_fresh_exit_candle(trade["symbol"])
+            if fresh_candle is not None and "close" in fresh_candle:
+                exit_price = float(fresh_candle["close"])
+                reason = "Time Exit"
+            else:
+                # Requirement 7: Never silently substitute entry price when fresh market data is unavailable. Keep trade open.
+                st.warning(f"Trade #{trade['id']} ({trade['symbol']}) has reached its 15-minute duration, but fresh market data is unavailable ({err}). Keeping trade open.")
+                continue
 
         if exit_price is not None:
             exit_time_str = utc_now_str()
@@ -266,12 +299,13 @@ def evaluate_and_close_trades(con, symbol, last_candle):
             secs = int(duration_delta.total_seconds() % 60)
             duration_str = f"{mins}m {secs}s"
 
+            # Requirements 4 & 5: Precise P/L calculations for BUY and SELL
             if side == "BUY":
                 pnl = (exit_price - entry) * qty
             else:
                 pnl = (entry - exit_price) * qty
 
-            # Requirements 1, 2, 3, 4, 5: Update virtual balance atomically and exactly once
+            # Requirements 1, 2, 3, 8: Update virtual balance atomically and exactly once
             balance_updated = int(trade["balance_updated"] if "balance_updated" in trade.keys() else 0)
             if balance_updated == 0:
                 bal_row = con.execute("SELECT value FROM app_settings WHERE key='virtual_balance'").fetchone()
@@ -318,20 +352,9 @@ def background_monitor_worker():
                 open_trades = con.execute("SELECT DISTINCT symbol FROM paper_trades WHERE status='OPEN'").fetchall()
                 for ot in open_trades:
                     sym = ot["symbol"]
-                    raw = yf.download(sym, interval="15m", period="1d", progress=False, threads=False)
+                    raw, err = fetch_candles(sym, "15m", "1d")
                     if not raw.empty:
-                        if isinstance(raw.columns, pd.MultiIndex):
-                            raw.columns = raw.columns.get_level_values(0)
-                        raw.columns = [str(c).strip() for c in raw.columns]
-                        if {"Open", "High", "Low", "Close"}.issubset(raw.columns):
-                            data = raw.reset_index()
-                            time_col = "Datetime" if "Datetime" in data.columns else "Date"
-                            if time_col not in data.columns:
-                                time_col = data.columns[0]
-                            data = data.rename(columns={time_col: "time", "Open": "open", "High": "high", "Low": "low", "Close": "close"})
-                            data["time"] = pd.to_datetime(data["time"], errors="coerce", utc=True)
-                            last_row = data.iloc[-1]
-                            evaluate_and_close_trades(con, sym, last_row)
+                        evaluate_and_close_trades(con, sym, raw.iloc[-1])
         except Exception:
             pass
 
@@ -436,14 +459,14 @@ with analyzer_tab:
                 st.caption("Auto Paper Trading OFF hai. Demo trade banane ke liye sidebar mein ise ON karein.")
                 
             if closed_count:
-                st.success(f"{closed_count} paper trade(s) closed based on SL/TP or 15-minute Time Exit.")
+                st.success(f"{closed_count} paper trade(s) closed based on SL/TP or verified 15-minute Time Exit.")
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Combined signal", signal)
         c2.metric("BUY votes", f"{buy_votes}/8")
         c3.metric("SELL votes", f"{sell_votes}/8")
         c4.metric("Latest close", f"{float(last['close']):.5f}")
-        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. Virtual balance accounting with atomic P/L integration enabled.")
+        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. Robust 15-minute Time Exit with fresh market price verification enabled.")
 
         fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name="Candles")])
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
@@ -478,7 +501,6 @@ with library_tab:
 with paper_tab:
     st.subheader("Paper Trading Journal & Balance Accounting")
     
-    # Requirement 8: Show current virtual balance and total realized P/L clearly
     current_balance_val = float(get_setting("virtual_balance", "10000") or 10000)
     
     with db_connect() as journal_con:
@@ -517,15 +539,14 @@ with paper_tab:
     else:
         st.dataframe(trades, use_container_width=True, hide_index=True)
         st.download_button("Download trade journal CSV", trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades.csv", mime="text/csv")
-    st.caption("Accounting note: When a trade closes (Stop Loss, Take Profit, or Time Exit), its realized P/L is atomically added to the virtual balance exactly once via a secure transaction flag.")
+    st.caption("Accounting note: When a trade closes (Stop Loss, Take Profit, or verified Time Exit), its realized P/L is atomically added to the virtual balance exactly once.")
 
 with setup_tab:
     st.subheader("Setup & Important Limits")
     st.markdown("""
-    - **Virtual Balance Accounting:** Realized P/L (`new_balance = current_balance + realized_pnl`) is updated atomically and exactly once per closed trade via database transaction flags (`balance_updated`).
-    - **15-Minute Max Duration & Time Exit:** Maximum holding limit is 15 minutes. If SL/TP is not reached, trades exit at the latest market price as **Time Exit**.
+    - **15-Minute Max Duration & Verified Time Exit:** Maximum holding limit is 15 minutes. When reached, the app fetches a fresh valid market price. If fresh data is unavailable, the trade remains open with a warning rather than substituting entry price.
+    - **Virtual Balance Accounting:** Realized P/L is updated atomically and exactly once per closed trade via database transaction flags (`balance_updated`).
     - **Simultaneous Trades Limit:** Maximum **3 open paper trades** simultaneously.
-    - **Hosting & Monitoring Limitation:** Streamlit Cloud sleeps during inactivity. Active browser session or manual refresh is required for continuous monitoring.
     - **Paper Trading Only:** No real broker connection or real money is involved.
     """)
     if st.button("Clear cached market data"):
