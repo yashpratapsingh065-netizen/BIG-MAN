@@ -20,7 +20,7 @@ except OSError:
     DB_PATH = Path("/tmp") / "big_man.db"
 STRATEGIES_PATH = APP_DIR / "strategies.json"
 
-st.set_page_config(page_title="BIG MAN Forex AI", page_icon="ðŸ“ˆ", layout="wide")
+st.set_page_config(page_title="BIG MAN Forex AI", page_icon="📈", layout="wide")
 
 PAIRS = {
     "EUR/USD": "EURUSD=X",
@@ -39,8 +39,10 @@ def utc_now():
 
 
 def db_connect():
-    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
     con.row_factory = sqlite3.Row
+    # Enable WAL mode and busy timeout to completely prevent database locks under concurrency
+    con.execute("PRAGMA journal_mode=WAL;")
     return con
 
 
@@ -186,7 +188,7 @@ def strategy_signals(data):
     add("Support / Resistance", "BUY" if close > prior_low + (prior_high-prior_low)*0.65 else "SELL" if close < prior_low + (prior_high-prior_low)*0.35 else "WAIT", "Price position inside recent 20-candle range")
     fib_low = prior_low + (prior_high-prior_low)*0.382
     fib_high = prior_low + (prior_high-prior_low)*0.618
-    add("Fibonacci Zone (proxy)", "BUY" if close > fib_high else "SELL" if close < fib_low else "WAIT", "Simple 38.2%â€“61.8% range proxy; not a full Fibonacci setup")
+    add("Fibonacci Zone (proxy)", "BUY" if close > fib_high else "SELL" if close < fib_low else "WAIT", "Simple 38.2%–61.8% range proxy; not a full Fibonacci setup")
     add("Breakout", "BUY" if close > prior_high else "SELL" if close < prior_low else "WAIT", "Close compared with previous range; levels exclude current candle")
     broke_up = float(prev["close"]) > prior_high if pd.notna(last["prior_high"]) else False
     broke_dn = float(prev["close"]) < prior_low if pd.notna(last["prior_low"]) else False
@@ -252,8 +254,8 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
 
 init_db()
 
-st.title("ðŸ“ˆ BIG MAN â€” Forex AI (Demo)")
-st.caption("Educational prototype â€¢ Yahoo Finance data â€¢ Paper trading only â€¢ No broker connection")
+st.title("📈 BIG MAN — Forex AI (Demo)")
+st.caption("Educational prototype • Yahoo Finance data • Paper trading only • No broker connection")
 
 with st.sidebar:
     st.header("Settings")
@@ -279,17 +281,17 @@ with st.sidebar:
     if new_auto != auto_enabled:
         set_setting("auto_paper", "1" if new_auto else "0")
         st.rerun()
-    st.button("ðŸ”„ Refresh market data", on_click=st.cache_data.clear, use_container_width=True)
+    st.button("🔄 Refresh market data", on_click=st.cache_data.clear, use_container_width=True)
     st.caption("Forex market data may be delayed or temporarily unavailable.")
 
 balance = float(get_setting("virtual_balance", "10000") or 10000)
 con = db_connect()
 data, fetch_error = fetch_candles(ticker, interval, period)
 
-analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["ðŸ“Š Analyzer", "ðŸ§  Strategy Library", "ðŸ§¾ Paper Trading", "âš™ï¸ Setup & Limits"])
+analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["📊 Analyzer", "🧠 Strategy Library", "🧾 Paper Trading", "⚙️ Setup & Limits"])
 
 with analyzer_tab:
-    st.subheader(f"{pair_label} Â· {timeframe_label}")
+    st.subheader(f"{pair_label} · {timeframe_label}")
     if fetch_error or data.empty:
         st.error(fetch_error or "Market data unavailable.")
         st.info("Internet connection check karein, phir Refresh market data dabayein. Yahoo Finance kabhi-kabhi intraday data limit kar sakta hai.")
@@ -342,7 +344,7 @@ with analyzer_tab:
         c2.metric("BUY votes", f"{buy_votes}/8")
         c3.metric("SELL votes", f"{sell_votes}/8")
         c4.metric("Latest close", f"{float(last['close']):.5f}")
-        st.caption(f"Mode: {signal_mode} Â· Signal threshold: {vote_threshold}/8 votes. Fast Mode mein false signals zyada ho sakte hain. Signal educational proxy hai, guaranteed prediction nahi.")
+        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. Fast Mode mein false signals zyada ho sakte hain. Signal educational proxy hai, guaranteed prediction nahi.")
 
         fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name="Candles")])
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
@@ -364,7 +366,7 @@ with library_tab:
         st.info("strategies.json file nahi mili. Neeche app ke 8 built-in educational proxy strategies hain.")
         st.dataframe(pd.DataFrame([
             {"Strategy": "Support / Resistance", "Purpose": "Recent range mein price location"},
-            {"Strategy": "Fibonacci Zone (proxy)", "Purpose": "38.2%â€“61.8% range zone"},
+            {"Strategy": "Fibonacci Zone (proxy)", "Purpose": "38.2%–61.8% range zone"},
             {"Strategy": "Breakout", "Purpose": "Previous range high/low break"},
             {"Strategy": "Fake Breakout (proxy)", "Purpose": "Possible failed breakout"},
             {"Strategy": "Trend Alignment", "Purpose": "SMA20/SMA50 trend filter"},
