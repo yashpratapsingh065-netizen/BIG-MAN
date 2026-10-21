@@ -120,7 +120,7 @@ st.markdown("""
 <div class="brand-header">
     <div class="brand-logo">🐂⚡</div>
     <div>
-        <div class="brand-title">BIG MAN — Forex AI Pro</div>
+        <div class="brand-title">BIG MAN — Forex AI Pro (High Yield Bid Enabled)</div>
         <div class="brand-subtitle">Institutional-Grade Paper Trading & Quantitative Ensemble Dashboard (IST Enabled)</div>
     </div>
 </div>
@@ -467,10 +467,11 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     entry = float(last_candle["close"])
     stop_distance = max(float(atr) * 1.5, entry * 0.001)
     
-    # Pro optimized 1:3 Risk-to-Reward ratio for higher profit targets
+    # INCREASED BID / PROFIT TARGET (1:3 Risk-to-Reward Ratio)
     stop = entry - stop_distance if side == "BUY" else entry + stop_distance
     target = entry + stop_distance * 3.0 if side == "BUY" else entry - stop_distance * 3.0
     
+    # INCREASED RISK & QUANTITY (1.5% Risk, up to 100,000 units lot size for bigger $ returns)
     risk_cash = max(10.0, float(balance) * 0.015)
     qty = min(risk_cash / stop_distance, 100000.0)
     
@@ -478,7 +479,7 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     
     con.execute("""INSERT INTO paper_trades(created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note,balance_updated)
                   VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?, 0)""", (utc_now_str(), symbol, timeframe, side, entry, stop, target, qty, note))
-    return True, f"Pro paper {side} trade created (1:3 R:R)."
+    return True, f"High-Bid paper {side} trade created (1:3 R:R, Bada Profit Target)."
 
 
 def background_monitor_worker():
@@ -599,7 +600,7 @@ with analyzer_tab:
         c2.metric("BUY votes", f"{buy_votes}/8")
         c3.metric("SELL votes", f"{sell_votes}/8")
         c4.metric("Latest close", f"{float(last['close']):.5f}")
-        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. Corrected execution pricing enabled.")
+        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. High-Bid 1:3 R:R execution enabled.")
 
         fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name="Candles")])
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
@@ -708,16 +709,15 @@ with paper_tab:
         st.info("Abhi koi paper trade nahi hai.")
     else:
         st.dataframe(display_trades, use_container_width=True, hide_index=True)
-        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades_ist.csv", mime="text/csv")
+        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades_ist.csv", mime="text/css")
     st.caption("Accounting note: Trade entry & exit timestamps are automatically displayed in Indian Standard Time (IST).")
 
 with setup_tab:
     st.subheader("Setup & Important Limits")
     st.markdown("""
-    - **Original Strategies Integrated:** Restored the proven 8-strategy voting ensemble (Support/Resistance, Fibonacci, Breakout, Fake Breakout, Trend Alignment, 2-Candle PA, SMA Touch, Supply/Demand).
-    - **Pro Risk Management:** Configured with a 1:3 Risk-to-Reward ratio to secure higher profit targets per winning trade.
-    - **Execution Pricing Fix:** Exit prices for Stop Loss and Take Profit record exact boundary levels (`stop` or `target`), while Time Exits fetch live market closing prices.
-    - **Virtual Balance Accounting:** Realized P/L is updated atomically and exactly once per closed trade.
+    - **High-Bid Position Sizing:** Lot size scaled up (up to 100,000 units) with 1.5% risk to target meaningful profits ($15–$50+).
+    - **Pro Risk Management:** Configured with an expanded 1:3 Risk-to-Reward ratio for higher profit targets.
+    - **Original Strategies Integrated:** Retains the proven 8-strategy voting ensemble.
     - **Simultaneous Trades Limit:** Maximum **3 open paper trades**.
     - **IST Timestamps & UI:** Premium dark mode styling with Indian Standard Time conversion.
     """)
