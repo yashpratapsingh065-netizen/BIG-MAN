@@ -208,6 +208,29 @@ def fetch_fresh_exit_candle(symbol):
         return None, str(exc)
 
 
+def weighted_strategy_consensus(votes_df):
+    """Computes weighted ensemble score and net market bias based on strategy reliability."""
+    weights = {
+        "Support / Resistance": 1.5,
+        "Trend Alignment": 1.5,
+        "Fake Breakout (proxy)": 1.5,
+        "Two-Candle Price Action": 1.0,
+        "Fibonacci Zone (proxy)": 1.0,
+        "Breakout": 1.0,
+        "SMA Touch / Bounce (proxy)": 0.75,
+        "Range Supply / Demand (proxy)": 0.75,
+    }
+    df = votes_df.copy()
+    df["Weight"] = df["Strategy"].map(weights).fillna(1.0)
+
+    buy_score = df[df["Signal"] == "BUY"]["Weight"].sum()
+    sell_score = df[df["Signal"] == "SELL"]["Weight"].sum()
+    total_weight = df["Weight"].sum()
+
+    net_consensus = ((sell_score - buy_score) / total_weight) * 100 if total_weight > 0 else 0.0
+    return buy_score, sell_score, net_consensus
+
+
 def strategy_signals(data):
     df = data.copy()
     df["sma20"] = df["close"].rolling(20, min_periods=5).mean()
@@ -466,8 +489,26 @@ with analyzer_tab:
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma50"], name="SMA 50", mode="lines"))
         fig.update_layout(height=520, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig, use_container_width=True)
-        st.subheader("8 strategy votes")
-        st.dataframe(votes, use_container_width=True, hide_index=True)
+
+        # Weighted Consensus calculations & Display
+        buy_score, sell_score, net_consensus = weighted_strategy_consensus(votes)
+        st.markdown("### 📈 Ensemble Weighted Consensus Meter")
+        wc1, wc2, wc3 = st.columns(3)
+        wc1.metric("Bearish Weight", f"{sell_score:.1f} pts")
+        wc2.metric("Bullish Weight", f"{buy_score:.1f} pts")
+        wc3.metric("Net Market Bias", f"{net_consensus:+.1f}%", delta="Bearish Tilt" if net_consensus > 0 else "Bullish Tilt")
+
+        def color_signals(val):
+            if val == "BUY":
+                return "color: #2ecc71; font-weight: bold;"
+            elif val == "SELL":
+                return "color: #e74c3c; font-weight: bold;"
+            elif val == "WAIT":
+                return "color: #f1c40f; font-weight: bold;"
+            return ""
+
+        st.subheader("8 strategy votes & Ensemble Breakdown")
+        st.dataframe(votes.style.map(color_signals, subset=["Signal"]), use_container_width=True, hide_index=True)
 
 with library_tab:
     st.subheader("Strategy Library")
@@ -514,17 +555,30 @@ with paper_tab:
             ORDER BY id DESC
         """, journal_con)
 
+    win_rate, profit_factor = 0.0, 0.0
     if not trades.empty:
-        closed_trades = trades[trades["Status"] == "CLOSED"]
-        total_realized_pnl = pd.to_numeric(closed_trades["P/L ($)"], errors="coerce").fillna(0).sum()
+        closed_trades = trades[trades["Status"] == "CLOSED"].copy()
+        closed_trades["P/L ($)"] = pd.to_numeric(closed_trades["P/L ($)"], errors="coerce").fillna(0)
+        total_realized_pnl = closed_trades["P/L ($)"].sum()
+
+        if len(closed_trades) > 0:
+            wins = closed_trades[closed_trades["P/L ($)"] > 0]
+            losses = closed_trades[closed_trades["P/L ($)"] < 0]
+            win_rate = (len(wins) / len(closed_trades)) * 100
+
+            gross_wins = wins["P/L ($)"].sum()
+            gross_losses = abs(losses["P/L ($)"].sum())
+            profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else (99.0 if gross_wins > 0 else 0.0)
     else:
         total_realized_pnl = 0.0
 
-    bm1, bm2, bm3, bm4 = st.columns(4)
-    bm1.metric("Virtual Balance", f"${current_balance_val:,.4f}")
-    bm2.metric("Total Realized P/L", f"${total_realized_pnl:,.4f}")
-    bm3.metric("Total Trades", len(trades))
-    bm4.metric("Open Trades", int((trades["Status"] == "OPEN").sum()) if not trades.empty else 0)
+    bm1, bm2, bm3, bm4, bm5, bm6 = st.columns(6)
+    bm1.metric("Virtual Balance", f"${current_balance_val:,.2f}")
+    bm2.metric("Realized P/L", f"${total_realized_pnl:,.2f}")
+    bm3.metric("Win Rate", f"{win_rate:.1f}%")
+    bm4.metric("Profit Factor", f"{profit_factor:.2f}")
+    bm5.metric("Total Trades", len(trades))
+    bm6.metric("Open Trades", int((trades["Status"] == "OPEN").sum()) if not trades.empty else 0)
 
     if trades.empty:
         st.info("Abhi koi paper trade nahi hai.")
