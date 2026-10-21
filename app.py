@@ -120,7 +120,7 @@ st.markdown("""
 <div class="brand-header">
     <div class="brand-logo">🐂⚡</div>
     <div>
-        <div class="brand-title">BIG MAN — Forex AI Pro (High Yield Bid Enabled)</div>
+        <div class="brand-title">BIG MAN — Forex AI Pro (High-Yield Bid Enabled)</div>
         <div class="brand-subtitle">Institutional-Grade Paper Trading & Quantitative Ensemble Dashboard (IST Enabled)</div>
     </div>
 </div>
@@ -301,7 +301,7 @@ def fetch_candles(ticker, interval, period):
 
 
 def fetch_fresh_exit_candle(symbol):
-    """Fetch the latest valid market price specifically for time-based trade exits. Never falls back to entry price."""
+    """Fetch the latest valid market price specifically for time-based trade exits."""
     try:
         raw = yf.download(symbol, interval="1m", period="1d", auto_adjust=False, progress=False, threads=False)
         if raw is None or raw.empty:
@@ -327,31 +327,8 @@ def fetch_fresh_exit_candle(symbol):
         return None, str(exc)
 
 
-def weighted_strategy_consensus(votes_df):
-    """Computes weighted ensemble score and net market bias based on strategy reliability."""
-    weights = {
-        "Support / Resistance": 1.5,
-        "Trend Alignment": 1.5,
-        "Fake Breakout (proxy)": 1.5,
-        "Two-Candle Price Action": 1.0,
-        "Fibonacci Zone (proxy)": 1.0,
-        "Breakout": 1.0,
-        "SMA Touch / Bounce (proxy)": 0.75,
-        "Range Supply / Demand (proxy)": 0.75,
-    }
-    df = votes_df.copy()
-    df["Weight"] = df["Strategy"].map(weights).fillna(1.0)
-
-    buy_score = df[df["Signal"] == "BUY"]["Weight"].sum()
-    sell_score = df[df["Signal"] == "SELL"]["Weight"].sum()
-    total_weight = df["Weight"].sum()
-
-    net_consensus = ((sell_score - buy_score) / total_weight) * 100 if total_weight > 0 else 0.0
-    return buy_score, sell_score, net_consensus
-
-
 def strategy_signals(data):
-    """Original BIG MAN2 8-Strategy Ensemble Voting System."""
+    """BIG MAN2 Original 8-Strategy Voting System."""
     df = data.copy()
     df["sma20"] = df["close"].rolling(20, min_periods=5).mean()
     df["sma50"] = df["close"].rolling(50, min_periods=10).mean()
@@ -390,7 +367,7 @@ def strategy_signals(data):
 
 
 def evaluate_and_close_trades(con, symbol, last_candle):
-    """Evaluate open paper trades against SL/TP or robust 15-minute Time Exit without fallback to entry prices."""
+    """Evaluate open paper trades against SL/TP or 15-minute Time Exit."""
     trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
     closed = 0
     hi, lo = float(last_candle["high"]), float(last_candle["low"])
@@ -467,11 +444,11 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     entry = float(last_candle["close"])
     stop_distance = max(float(atr) * 1.5, entry * 0.001)
     
-    # INCREASED BID / PROFIT TARGET (1:3 Risk-to-Reward Ratio)
+    # High-Yield Bid (1:3 R:R)
     stop = entry - stop_distance if side == "BUY" else entry + stop_distance
     target = entry + stop_distance * 3.0 if side == "BUY" else entry - stop_distance * 3.0
     
-    # INCREASED RISK & QUANTITY (1.5% Risk, up to 100,000 units lot size for bigger $ returns)
+    # Scaled Quantity (Up to 100,000 units with 1.5% risk)
     risk_cash = max(10.0, float(balance) * 0.015)
     qty = min(risk_cash / stop_distance, 100000.0)
     
@@ -479,7 +456,7 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     
     con.execute("""INSERT INTO paper_trades(created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note,balance_updated)
                   VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?, 0)""", (utc_now_str(), symbol, timeframe, side, entry, stop, target, qty, note))
-    return True, f"High-Bid paper {side} trade created (1:3 R:R, Bada Profit Target)."
+    return True, f"High-Bid paper {side} trade created (1:3 R:R, Scaled Quantity)."
 
 
 def background_monitor_worker():
@@ -615,13 +592,6 @@ with analyzer_tab:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        buy_score, sell_score, net_consensus = weighted_strategy_consensus(votes)
-        st.markdown("### 📈 Ensemble Weighted Consensus Meter")
-        wc1, wc2, wc3 = st.columns(3)
-        wc1.metric("Bearish Weight", f"{sell_score:.1f} pts")
-        wc2.metric("Bullish Weight", f"{buy_score:.1f} pts")
-        wc3.metric("Net Market Bias", f"{net_consensus:+.1f}%", delta="Bearish Tilt" if net_consensus > 0 else "Bullish Tilt")
-
         def color_signals(val):
             if val == "BUY":
                 return "color: #2ecc71; font-weight: bold;"
@@ -631,7 +601,7 @@ with analyzer_tab:
                 return "color: #f1c40f; font-weight: bold;"
             return ""
 
-        st.subheader("8 Strategy Votes & Ensemble Breakdown")
+        st.subheader("8 Strategy Votes")
         st.dataframe(votes.style.map(color_signals, subset=["Signal"]), use_container_width=True, hide_index=True)
 
 with library_tab:
@@ -709,17 +679,17 @@ with paper_tab:
         st.info("Abhi koi paper trade nahi hai.")
     else:
         st.dataframe(display_trades, use_container_width=True, hide_index=True)
-        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades_ist.csv", mime="text/css")
+        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades_ist.csv", mime="text/csv")
     st.caption("Accounting note: Trade entry & exit timestamps are automatically displayed in Indian Standard Time (IST).")
 
 with setup_tab:
     st.subheader("Setup & Important Limits")
     st.markdown("""
-    - **High-Bid Position Sizing:** Lot size scaled up (up to 100,000 units) with 1.5% risk to target meaningful profits ($15–$50+).
-    - **Pro Risk Management:** Configured with an expanded 1:3 Risk-to-Reward ratio for higher profit targets.
-    - **Original Strategies Integrated:** Retains the proven 8-strategy voting ensemble.
+    - **Original Strategies Retained:** Uses the exact same 8-strategy voting ensemble from BIG MAN2.
+    - **High-Yield Position Sizing:** Scaled up lot sizing (up to 100,000 units) with 1.5% risk to target larger profits ($15–$50+).
+    - **Pro Risk Management:** Configured with an expanded 1:3 Risk-to-Reward ratio.
     - **Simultaneous Trades Limit:** Maximum **3 open paper trades**.
-    - **IST Timestamps & UI:** Premium dark mode styling with Indian Standard Time conversion.
+    - **IST Timestamps & Premium UI:** Dark mode glassmorphism styling with Indian Standard Time conversion.
     """)
     if st.button("Clear cached market data"):
         st.cache_data.clear()
