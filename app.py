@@ -24,11 +24,11 @@ try:
     _probe = DATA_DIR / ".write_test"
     _probe.write_text("ok", encoding="utf-8")
     _probe.unlink(missing_ok=True)
-    DB_PATH = DATA_DIR / "big_man1.db"
+    DB_PATH = DATA_DIR / "big_man2.db"
 except OSError:
-    DB_PATH = Path("/tmp") / "big_man1.db"
+    DB_PATH = Path("/tmp") / "big_man2.db"
 
-st.set_page_config(page_title="BIG MAN1 — Forex AI Pro (SMC & Price Action)", page_icon="📈", layout="wide")
+st.set_page_config(page_title="BIG MAN2 — Forex AI Pro (SMC & Price Action)", page_icon="📈", layout="wide")
 
 # ==========================================
 # EXPERT UI: PREMIUM DARK MODE & BRANDING CSS
@@ -113,7 +113,7 @@ st.markdown("""
 <div class="brand-header">
     <div class="brand-logo">🐂⚡</div>
     <div>
-        <div class="brand-title">BIG MAN1 — Forex AI Pro (SMC & Price Action)</div>
+        <div class="brand-title">BIG MAN2 — Forex AI Pro (SMC & Price Action)</div>
         <div class="brand-subtitle">Demo Paper Trading Simulator + MT5 Live Integration & Balanced 15m 9s Exit</div>
     </div>
 </div>
@@ -324,7 +324,7 @@ def execute_mt5_live_trade(symbol_label, side, volume, stop_loss, take_profit):
         "tp": float(take_profit),
         "deviation": 20,
         "magic": 234000,
-        "comment": "BIG MAN1 Pro",
+        "comment": "BIG MAN2 Pro",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
@@ -419,7 +419,7 @@ def evaluate_and_close_trades(con, symbol, last_candle):
             elif lo <= target:
                 exit_price, reason = target, "Take Profit"
 
-        # Restored 15m 9s (909 seconds) Safe Time Exit
+        # 15m 9s (909 seconds) Safe Time Exit
         elapsed_seconds = (now_utc - created_time.to_pydatetime()).total_seconds()
         if exit_price is None and elapsed_seconds >= 909.0:
             fresh_candle, err = fetch_fresh_exit_candle(trade["symbol"])
@@ -647,7 +647,7 @@ with analyzer_tab:
                     m_made, m_msg = create_auto_trade(man_con, ticker, timeframe_code, manual_side, last, atr, balance, None, pair_label, mt5_live_mode)
                     if m_made:
                         st.success(m_msg)
-                        st.rerurn()
+                        st.rerun()  # FIXED TYPO HERE
                     else:
                         st.error(m_msg)
 
@@ -781,12 +781,12 @@ with paper_tab:
         st.info("Abhi koi trade record nahi hai.")
     else:
         st.dataframe(display_trades, use_container_width=True, hide_index=True)
-        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man1_smc_trades.csv", mime="text/csv")
+        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man2_smc_trades.csv", mime="text/csv")
 
 with setup_tab:
     st.subheader("Setup & Instructions")
     st.markdown("""
-    - **Balanced Exit & Control:** 15m 9s safe time exit is active to prevent prolonged drawdowns, alongside Manual Buy/Sell and Manual Close capabilities.
+    - **BIG MAN2 Pro:** Balanced time exit (15m 9s), manual buy/sell panel, and manual trade management enabled.
     - **MetaTrader 5 Live Integration:** Enable **Live Trading Mode (MT5)** in the sidebar anytime to route orders directly to your MT5 terminal.
     - **Timezone:** Timestamps are automatically converted to Indian Standard Time (IST).
     """)
