@@ -121,7 +121,7 @@ st.markdown("""
     <div class="brand-logo">🐂⚡</div>
     <div>
         <div class="brand-title">BIG MAN — Forex AI Pro</div>
-        <div class="brand-subtitle">Institutional-Grade Paper Trading & Quantitative Ensemble Dashboard</div>
+        <div class="brand-subtitle">Institutional-Grade Paper Trading & Quantitative Ensemble Dashboard (IST Enabled)</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -140,6 +140,23 @@ TIMEFRAMES = {
 
 def utc_now_str():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def convert_utc_to_ist(utc_str):
+    """Converts UTC timestamp string to Indian Standard Time (IST) format."""
+    if not utc_str or pd.isna(utc_str):
+        return ""
+    try:
+        dt = pd.to_datetime(utc_str)
+        if dt.tzinfo is None:
+            dt = dt.tz_localize("UTC")
+        else:
+            dt = dt.tz_convert("UTC")
+        ist_zone = timezone(timedelta(hours=5, minutes=30))
+        ist_dt = dt.tz_convert(ist_zone)
+        return ist_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    except Exception:
+        return str(utc_str)
 
 
 def db_connect():
@@ -642,7 +659,7 @@ with library_tab:
         ]), use_container_width=True, hide_index=True)
 
 with paper_tab:
-    st.subheader("Paper Trading Journal & Balance Accounting")
+    st.subheader("Paper Trading Journal & Balance Accounting (IST Timings)")
     
     current_balance_val = float(get_setting("virtual_balance", "10000") or 10000)
     
@@ -652,11 +669,11 @@ with paper_tab:
                    symbol AS 'Currency Pair', 
                    side AS 'Side', 
                    entry AS 'Entry Price', 
-                   created_at AS 'Entry Time', 
+                   created_at AS 'Entry Time (UTC)', 
                    stop AS 'Stop Loss', 
                    target AS 'Take Profit', 
                    exit_price AS 'Exit Price', 
-                   exit_time AS 'Exit Time', 
+                   exit_time AS 'Exit Time (UTC)', 
                    duration AS 'Duration', 
                    status AS 'Status', 
                    pnl AS 'P/L ($)', 
@@ -667,6 +684,18 @@ with paper_tab:
 
     win_rate, profit_factor = 0.0, 0.0
     if not trades.empty:
+        # Convert UTC timestamps to Indian Standard Time (IST) for local user convenience
+        trades['Entry Time'] = trades['Entry Time (UTC)'].apply(convert_utc_to_ist)
+        trades['Exit Time'] = trades['Exit Time (UTC)'].apply(convert_utc_to_ist)
+        
+        # Drop raw UTC time columns for cleaner professional UI layout
+        display_trades = trades.drop(columns=['Entry Time (UTC)', 'Exit Time (UTC)'])
+        
+        # Reorder columns to put IST time right after Trade ID & Pair
+        cols = ['Trade ID', 'Currency Pair', 'Side', 'Entry Price', 'Entry Time', 'Stop Loss', 'Take Profit', 'Exit Price', 'Exit Time', 'Duration', 'Status', 'P/L ($)', 'Exit Reason']
+        existing_cols = [c for c in cols if c in display_trades.columns]
+        display_trades = display_trades[existing_cols]
+
         closed_trades = trades[trades["Status"] == "CLOSED"].copy()
         closed_trades["P/L ($)"] = pd.to_numeric(closed_trades["P/L ($)"], errors="coerce").fillna(0)
         total_realized_pnl = closed_trades["P/L ($)"].sum()
@@ -680,6 +709,7 @@ with paper_tab:
             gross_losses = abs(losses["P/L ($)"].sum())
             profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else (99.0 if gross_wins > 0 else 0.0)
     else:
+        display_trades = trades
         total_realized_pnl = 0.0
 
     bm1, bm2, bm3, bm4, bm5, bm6 = st.columns(6)
@@ -690,16 +720,17 @@ with paper_tab:
     bm5.metric("Total Trades", len(trades))
     bm6.metric("Open Trades", int((trades["Status"] == "OPEN").sum()) if not trades.empty else 0)
 
-    if trades.empty:
+    if display_trades.empty:
         st.info("Abhi koi paper trade nahi hai.")
     else:
-        st.dataframe(trades, use_container_width=True, hide_index=True)
-        st.download_button("Download trade journal CSV", trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades.csv", mime="text/csv")
-    st.caption("Accounting note: Exit prices are correctly recorded as Stop Loss, Take Profit, or verified Time Exit prices—never defaulting to entry price.")
+        st.dataframe(display_trades, use_container_width=True, hide_index=True)
+        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man_paper_trades_ist.csv", mime="text/csv")
+    st.caption("Accounting note: Trade entry and exit times are automatically displayed in Indian Standard Time (IST) for your convenience.")
 
 with setup_tab:
     st.subheader("Setup & Important Limits")
     st.markdown("""
+    - **IST Local Timing:** Trade journal timestamps are automatically converted to Indian Standard Time (IST) for easy tracking.
     - **Pro Risk Management:** Configured with a 1:3 Risk-to-Reward ratio and 1.5% capital exposure to target higher net returns per winning trade.
     - **Execution Pricing Fix:** Exit prices for Stop Loss and Take Profit record their exact boundary levels (`stop` or `target`), while Time Exits fetch live market closing prices.
     - **Virtual Balance Accounting:** Realized P/L is updated atomically and exactly once per closed trade.
