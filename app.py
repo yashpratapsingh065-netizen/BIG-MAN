@@ -22,7 +22,7 @@ except OSError:
     DB_PATH = Path("/tmp") / "big_man.db"
 STRATEGIES_PATH = APP_DIR / "strategies.json"
 
-st.set_page_config(page_title="BIG MAN Forex AI", page_icon="📈", layout="wide")
+st.set_page_config(page_title="BIG MAN Forex AI Pro", page_icon="📈", layout="wide")
 
 PAIRS = {
     "EUR/USD": "EURUSD=X",
@@ -350,15 +350,20 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     
     entry = float(last_candle["close"])
     stop_distance = max(float(atr) * 1.5, entry * 0.001)
+    
+    # PRO TRADER ADJUSTMENT: 1:3 Risk-to-Reward Ratio for bigger profit targets
     stop = entry - stop_distance if side == "BUY" else entry + stop_distance
-    target = entry + stop_distance * 1.5 if side == "BUY" else entry - stop_distance * 1.5
-    risk_cash = max(1.0, float(balance) * 0.005)
-    qty = min(risk_cash / stop_distance, 10000.0)
+    target = entry + stop_distance * 3.0 if side == "BUY" else entry - stop_distance * 3.0
+    
+    # PRO TRADER ADJUSTMENT: 1.5% risk per trade with up to 100,000 unit lot scaling for higher returns
+    risk_cash = max(10.0, float(balance) * 0.015)
+    qty = min(risk_cash / stop_distance, 100000.0)
+    
     note = ", ".join(signals.loc[signals["Signal"] == side, "Strategy"].tolist())
     
     con.execute("""INSERT INTO paper_trades(created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note,balance_updated)
                   VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?, 0)""", (utc_now_str(), symbol, timeframe, side, entry, stop, target, qty, note))
-    return True, f"Demo paper {side} trade created."
+    return True, f"Pro-optimized paper {side} trade created (1:3 R:R)."
 
 
 def background_monitor_worker():
@@ -386,8 +391,8 @@ def start_background_monitor():
 init_db()
 start_background_monitor()
 
-st.title("📈 BIG MAN — Forex AI (Demo)")
-st.caption("Educational prototype • Yahoo Finance data • Paper trading only • No broker connection")
+st.title("📈 BIG MAN — Forex AI Pro")
+st.caption("Expert trader setup • 1:3 Risk-Reward Optimization • Paper trading only")
 
 with st.sidebar:
     st.header("Settings")
@@ -482,7 +487,7 @@ with analyzer_tab:
         c2.metric("BUY votes", f"{buy_votes}/8")
         c3.metric("SELL votes", f"{sell_votes}/8")
         c4.metric("Latest close", f"{float(last['close']):.5f}")
-        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. Corrected execution pricing enabled.")
+        st.caption(f"Mode: {signal_mode} · Signal threshold: {vote_threshold}/8 votes. Pro 1:3 R:R execution enabled.")
 
         fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name="Candles")])
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
@@ -490,7 +495,6 @@ with analyzer_tab:
         fig.update_layout(height=520, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
-        # Weighted Consensus calculations & Display
         buy_score, sell_score, net_consensus = weighted_strategy_consensus(votes)
         st.markdown("### 📈 Ensemble Weighted Consensus Meter")
         wc1, wc2, wc3 = st.columns(3)
@@ -590,7 +594,8 @@ with paper_tab:
 with setup_tab:
     st.subheader("Setup & Important Limits")
     st.markdown("""
-    - **Execution Pricing Fix:** Exit prices for Stop Loss and Take Profit record their exact boundary levels (`stop` or `target`), while Time Exits fetch live market closing prices. Entry price is never substituted as a fallback.
+    - **Pro Risk Management:** Configured with a 1:3 Risk-to-Reward ratio and 1.5% capital exposure to target higher net returns per winning trade.
+    - **Execution Pricing Fix:** Exit prices for Stop Loss and Take Profit record their exact boundary levels (`stop` or `target`), while Time Exits fetch live market closing prices.
     - **Virtual Balance Accounting:** Realized P/L is updated atomically and exactly once per closed trade.
     - **Simultaneous Trades Limit:** Maximum **3 open paper trades**.
     - **Paper Trading Only:** No real broker connection or real money.
