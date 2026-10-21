@@ -24,6 +24,108 @@ STRATEGIES_PATH = APP_DIR / "strategies.json"
 
 st.set_page_config(page_title="BIG MAN Forex AI Pro", page_icon="📈", layout="wide")
 
+# ==========================================
+# EXPERT UI: PREMIUM DARK MODE & BRANDING CSS
+# ==========================================
+st.markdown("""
+<style>
+    /* Global App Styling */
+    .stApp {
+        background-color: #0b0f19;
+        color: #f3f4f6;
+    }
+    
+    /* Branded Header */
+    .brand-header {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        padding: 15px 0;
+        border-bottom: 1px solid #1f2937;
+        margin-bottom: 25px;
+    }
+    .brand-logo {
+        font-size: 2.4rem;
+        background: linear-gradient(135deg, #3b82f6 0%, #10b981 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background-color: #111827;
+        padding: 8px 14px;
+        border-radius: 14px;
+        border: 1px solid #374151;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    }
+    .brand-title {
+        font-size: 1.9rem;
+        font-weight: 800;
+        color: #ffffff;
+        letter-spacing: 0.5px;
+        margin: 0;
+    }
+    .brand-subtitle {
+        color: #9ca3af;
+        font-size: 0.9rem;
+        margin: 0;
+    }
+
+    /* Premium Metric Card Styling */
+    div[data-testid="stMetric"] {
+        background: linear-gradient(145deg, #111827 0%, #0f172a 100%);
+        border: 1px solid #1e293b;
+        padding: 16px;
+        border-radius: 14px;
+        box-shadow: 0 4px 15px -3px rgba(0, 0, 0, 0.5);
+        transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    div[data-testid="stMetric"]:hover {
+        border-color: #3b82f6;
+        transform: translateY(-2px);
+    }
+    div[data-testid="stMetric"] label {
+        color: #94a3b8 !important;
+        font-weight: 600;
+        font-size: 0.9rem !important;
+    }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #f8fafc !important;
+        font-weight: 800;
+        font-size: 1.5rem !important;
+    }
+
+    /* Tabs Styling Polish */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: #111827;
+        padding: 6px;
+        border-radius: 12px;
+        border: 1px solid #1f2937;
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px;
+        color: #9ca3af;
+        font-weight: 600;
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
+        color: white !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Render Branded Header with Logo
+st.markdown("""
+<div class="brand-header">
+    <div class="brand-logo">🐂⚡</div>
+    <div>
+        <div class="brand-title">BIG MAN — Forex AI Pro</div>
+        <div class="brand-subtitle">Institutional-Grade Paper Trading & Quantitative Ensemble Dashboard</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
 PAIRS = {
     "EUR/USD": "EURUSD=X",
     "GBP/USD": "GBPUSD=X",
@@ -351,11 +453,11 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     entry = float(last_candle["close"])
     stop_distance = max(float(atr) * 1.5, entry * 0.001)
     
-    # PRO TRADER ADJUSTMENT: 1:3 Risk-to-Reward Ratio for bigger profit targets
+    # PRO TRADER: 1:3 Risk-to-Reward Ratio for bigger profit targets
     stop = entry - stop_distance if side == "BUY" else entry + stop_distance
     target = entry + stop_distance * 3.0 if side == "BUY" else entry - stop_distance * 3.0
     
-    # PRO TRADER ADJUSTMENT: 1.5% risk per trade with up to 100,000 unit lot scaling for higher returns
+    # PRO TRADER: 1.5% risk per trade with up to 100,000 unit lot scaling
     risk_cash = max(10.0, float(balance) * 0.015)
     qty = min(risk_cash / stop_distance, 100000.0)
     
@@ -390,9 +492,6 @@ def start_background_monitor():
 
 init_db()
 start_background_monitor()
-
-st.title("📈 BIG MAN — Forex AI Pro")
-st.caption("Expert trader setup • 1:3 Risk-Reward Optimization • Paper trading only")
 
 with st.sidebar:
     st.header("Settings")
@@ -492,7 +591,14 @@ with analyzer_tab:
         fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name="Candles")])
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
         fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma50"], name="SMA 50", mode="lines"))
-        fig.update_layout(height=520, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+        fig.update_layout(
+            height=520, 
+            xaxis_rangeslider_visible=False, 
+            margin=dict(l=10, r=10, t=30, b=10),
+            paper_bgcolor="#0b0f19",
+            plot_bgcolor="#0b0f19",
+            font=dict(color="#f3f4f6")
+        )
         st.plotly_chart(fig, use_container_width=True)
 
         buy_score, sell_score, net_consensus = weighted_strategy_consensus(votes)
