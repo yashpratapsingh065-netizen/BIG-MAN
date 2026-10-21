@@ -114,7 +114,7 @@ st.markdown("""
     <div class="brand-logo">🐂⚡</div>
     <div>
         <div class="brand-title">BIG MAN1 — Forex AI Pro (SMC & Price Action)</div>
-        <div class="brand-subtitle">Demo Paper Trading Simulator + MT5 Live Integration & Advanced SMC (Manual Exit Enabled)</div>
+        <div class="brand-subtitle">Demo Paper Trading Simulator + MT5 Live Integration & Balanced 15m 9s Exit</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -324,7 +324,7 @@ def execute_mt5_live_trade(symbol_label, side, volume, stop_loss, take_profit):
         "tp": float(take_profit),
         "deviation": 20,
         "magic": 234000,
-        "comment": "BIG MAN1 SMC AI Pro",
+        "comment": "BIG MAN1 Pro",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
@@ -391,7 +391,6 @@ def strategy_signals(data):
     return df, pd.DataFrame(signals), atr
 
 def evaluate_and_close_trades(con, symbol, last_candle):
-    # Time-based exit completely removed. Trades only close on Stop Loss or Take Profit.
     trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
     closed = 0
     hi, lo = float(last_candle["high"]), float(last_candle["low"])
@@ -419,6 +418,16 @@ def evaluate_and_close_trades(con, symbol, last_candle):
                 exit_price, reason = stop, "Stop Loss"
             elif lo <= target:
                 exit_price, reason = target, "Take Profit"
+
+        # Restored 15m 9s (909 seconds) Safe Time Exit
+        elapsed_seconds = (now_utc - created_time.to_pydatetime()).total_seconds()
+        if exit_price is None and elapsed_seconds >= 909.0:
+            fresh_candle, err = fetch_fresh_exit_candle(trade["symbol"])
+            if fresh_candle is not None and "close" in fresh_candle:
+                exit_price = float(fresh_candle["close"])
+                reason = "Time Exit (15m 9s)"
+            else:
+                continue
 
         if exit_price is not None:
             exit_time_str = utc_now_str()
@@ -501,7 +510,7 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     risk_cash = max(10.0, float(balance) * 0.015)
     qty = min(risk_cash / stop_distance, 100000.0)
     
-    note = ", ".join(signals.loc[signals["Signal"] == side, "Strategy"].tolist())
+    note = ", ".join(signals.loc[signals["Signal"] == side, "Strategy"].tolist()) if signals is not None else "Manual Execution"
     
     if mt5_live_enabled:
         success, msg = execute_mt5_live_trade(pair_label, side, 0.1, stop, target)
@@ -628,6 +637,19 @@ with analyzer_tab:
                     st.caption("Signal WAIT hai.")
             else:
                 st.caption("Auto Trading OFF hai.")
+
+        # --- MANUAL EXECUTION PANEL ---
+        with st.expander("⚡ Manual Trade Execution Panel (Buy / Sell)", expanded=True):
+            mc1, mc2, mc3 = st.columns(3)
+            manual_side = mc1.selectbox("Select Direction", ["BUY", "SELL"], key="manual_side_select")
+            if mc3.button("🚀 Execute Manual Order", use_container_width=True, key="manual_exec_btn"):
+                with db_connect() as man_con:
+                    m_made, m_msg = create_auto_trade(man_con, ticker, timeframe_code, manual_side, last, atr, balance, None, pair_label, mt5_live_mode)
+                    if m_made:
+                        st.success(m_msg)
+                        st.rerurn()
+                    else:
+                        st.error(m_msg)
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Combined signal", signal)
@@ -759,15 +781,13 @@ with paper_tab:
         st.info("Abhi koi trade record nahi hai.")
     else:
         st.dataframe(display_trades, use_container_width=True, hide_index=True)
-        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man1_smc_trades.csv", mime="text/css")
+        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man1_smc_trades.csv", mime="text/csv")
 
 with setup_tab:
     st.subheader("Setup & Instructions")
     st.markdown("""
-    - **Demo Paper Trading Simulator:** By default, the app runs as a paper trading simulator with customizable demo balance.
-    - **MetaTrader 5 Live Integration:** Enable **Live Trading Mode (MT5)** in the sidebar anytime to route trades directly to your MT5 terminal.
-    - **Advanced SMC Suite:** Includes Fair Value Gaps (FVG), Inducement (IDM) traps, and 50% Equilibrium Zones derived from Price Lesson Hindi.
-    - **Manual Exit Support:** Time-based exits have been removed. Trades run until they hit Stop Loss, Take Profit, or you click **Close Trade** manually.
+    - **Balanced Exit & Control:** 15m 9s safe time exit is active to prevent prolonged drawdowns, alongside Manual Buy/Sell and Manual Close capabilities.
+    - **MetaTrader 5 Live Integration:** Enable **Live Trading Mode (MT5)** in the sidebar anytime to route orders directly to your MT5 terminal.
     - **Timezone:** Timestamps are automatically converted to Indian Standard Time (IST).
     """)
     if st.button("Clear cached market data"):
