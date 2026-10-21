@@ -27,22 +27,18 @@ try:
     DB_PATH = DATA_DIR / "big_man1.db"
 except OSError:
     DB_PATH = Path("/tmp") / "big_man1.db"
-STRATEGIES_PATH = APP_DIR / "strategies.json"
 
-st.set_page_config(page_title="BIG MAN1 — MT5 Live Trader", page_icon="📈", layout="wide")
+st.set_page_config(page_title="BIG MAN1 — Forex AI Pro (Demo & MT5 Live)", page_icon="📈", layout="wide")
 
 # ==========================================
 # EXPERT UI: PREMIUM DARK MODE & BRANDING CSS
 # ==========================================
 st.markdown("""
 <style>
-    /* Global App Styling */
     .stApp {
         background-color: #0b0f19;
         color: #f3f4f6;
     }
-    
-    /* Branded Header */
     .brand-header {
         display: flex;
         align-items: center;
@@ -77,19 +73,12 @@ st.markdown("""
         font-size: 0.9rem;
         margin: 0;
     }
-
-    /* Premium Metric Card Styling */
     div[data-testid="stMetric"] {
         background: linear-gradient(145deg, #111827 0%, #0f172a 100%);
         border: 1px solid #1e293b;
         padding: 16px;
         border-radius: 14px;
         box-shadow: 0 4px 15px -3px rgba(0, 0, 0, 0.5);
-        transition: transform 0.2s ease, border-color 0.2s ease;
-    }
-    div[data-testid="stMetric"]:hover {
-        border-color: #3b82f6;
-        transform: translateY(-2px);
     }
     div[data-testid="stMetric"] label {
         color: #94a3b8 !important;
@@ -101,8 +90,6 @@ st.markdown("""
         font-weight: 800;
         font-size: 1.5rem !important;
     }
-
-    /* Tabs Styling Polish */
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
         background-color: #111827;
@@ -122,13 +109,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Render Branded Header with Logo
 st.markdown("""
 <div class="brand-header">
     <div class="brand-logo">🐂⚡</div>
     <div>
-        <div class="brand-title">BIG MAN1 — MT5 Live Trader (High-Yield Bid Enabled)</div>
-        <div class="brand-subtitle">MetaTrader 5 Live Integration & Quantitative Ensemble Dashboard (IST Enabled)</div>
+        <div class="brand-title">BIG MAN1 — Forex AI Pro (Demo & MT5 Live)</div>
+        <div class="brand-subtitle">Demo Paper Trading Simulator + MT5 Live Integration & Quantitative Ensemble</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -144,13 +130,10 @@ TIMEFRAMES = {
     "D1 (1 day)": ("1d", "6mo"),
 }
 
-
 def utc_now_str():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-
 def convert_utc_to_ist(utc_str):
-    """Converts UTC timestamp string to Indian Standard Time (IST) format."""
     if not utc_str or pd.isna(utc_str):
         return ""
     try:
@@ -164,7 +147,6 @@ def convert_utc_to_ist(utc_str):
         return ist_dt.strftime("%Y-%m-%d %H:%M:%S IST")
     except Exception:
         return str(utc_str)
-
 
 def db_connect():
     for attempt in range(5):
@@ -180,7 +162,6 @@ def db_connect():
             if attempt == 4:
                 raise
             time.sleep(0.5)
-
 
 def init_db():
     with db_connect() as con:
@@ -218,22 +199,6 @@ def init_db():
             existing = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
             if not existing:
                 con.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, value))
-                
-        columns = {row[1] for row in con.execute("PRAGMA table_info(paper_trades)").fetchall()}
-        migrations = {
-            "timeframe": "TEXT NOT NULL DEFAULT 'H1'",
-            "exit_time": "TEXT",
-            "duration": "TEXT",
-            "exit_reason": "TEXT",
-            "strategy_note": "TEXT",
-            "balance_updated": "INTEGER DEFAULT 0",
-        }
-        for name, definition in migrations.items():
-            if name not in columns:
-                con.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {definition}")
-                if name == "balance_updated":
-                    con.execute("UPDATE paper_trades SET balance_updated = 1 WHERE status = 'CLOSED'")
-
 
 def get_setting(key, default=""):
     try:
@@ -242,7 +207,6 @@ def get_setting(key, default=""):
         return row[0] if row else default
     except Exception:
         return default
-
 
 def set_setting(key, value):
     try:
@@ -255,22 +219,12 @@ def set_setting(key, value):
     except Exception as exc:
         st.warning(f"Setting save nahi ho saki: {exc}")
 
-
 def con_set_setting(con, key, value):
     existing = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
     if existing:
         con.execute("UPDATE app_settings SET value=? WHERE key=?", (str(value), key))
     else:
         con.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, str(value)))
-
-
-def load_processed_candles():
-    try:
-        result = json.loads(get_setting("last_processed_candles", "{}"))
-        return result if isinstance(result, dict) else {}
-    except (TypeError, json.JSONDecodeError):
-        return {}
-
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_candles(ticker, interval, period):
@@ -307,9 +261,7 @@ def fetch_candles(ticker, interval, period):
     except Exception as exc:
         return pd.DataFrame(), f"Market data fetch error: {type(exc).__name__}: {exc}"
 
-
 def fetch_fresh_exit_candle(symbol):
-    """Fetch the latest valid market price specifically for time-based trade exits."""
     try:
         raw = yf.download(symbol, interval="1m", period="1d", auto_adjust=False, progress=False, threads=False)
         if raw is None or raw.empty:
@@ -334,20 +286,15 @@ def fetch_fresh_exit_candle(symbol):
     except Exception as exc:
         return None, str(exc)
 
-
 def execute_mt5_live_trade(symbol_label, side, volume, stop_loss, take_profit):
-    """Execute live trade on MetaTrader 5 terminal."""
     if not MT5_AVAILABLE:
         return False, "MetaTrader5 library installed nahi hai."
     if not mt5.initialize():
         return False, f"MT5 initialization failed: {mt5.last_error()}"
     
-    # Map pair label to MT5 symbol format (e.g., EURUSD=X -> EURUSD)
     mt5_symbol = symbol_label.replace("/", "")
-    
     symbol_info = mt5.symbol_info(mt5_symbol)
     if symbol_info is None:
-        # Try alternate lookup
         mt5_symbol = symbol_label.replace("/", "") + ".m"
         symbol_info = mt5.symbol_info(mt5_symbol)
         if symbol_info is None:
@@ -391,9 +338,7 @@ def execute_mt5_live_trade(symbol_label, side, volume, stop_loss, take_profit):
     mt5.shutdown()
     return True, f"MT5 Live Order Executed! Ticket: {result.order}"
 
-
 def strategy_signals(data):
-    """BIG MAN2 Original 8-Strategy Voting System."""
     df = data.copy()
     df["sma20"] = df["close"].rolling(20, min_periods=5).mean()
     df["sma50"] = df["close"].rolling(50, min_periods=10).mean()
@@ -418,11 +363,11 @@ def strategy_signals(data):
     add("Support / Resistance", "BUY" if close > prior_low + (prior_high-prior_low)*0.65 else "SELL" if close < prior_low + (prior_high-prior_low)*0.35 else "WAIT", "Price position inside recent 20-candle range")
     fib_low = prior_low + (prior_high-prior_low)*0.382
     fib_high = prior_low + (prior_high-prior_low)*0.618
-    add("Fibonacci Zone (proxy)", "BUY" if close > fib_high else "SELL" if close < fib_low else "WAIT", "Simple 38.2%–61.8% range proxy; not a full Fibonacci setup")
-    add("Breakout", "BUY" if close > prior_high else "SELL" if close < prior_low else "WAIT", "Close compared with previous range; levels exclude current candle")
+    add("Fibonacci Zone (proxy)", "BUY" if close > fib_high else "SELL" if close < fib_low else "WAIT", "Simple 38.2%–61.8% range proxy")
+    add("Breakout", "BUY" if close > prior_high else "SELL" if close < prior_low else "WAIT", "Close compared with previous range")
     broke_up = float(prev["close"]) > prior_high if pd.notna(last["prior_high"]) else False
     broke_dn = float(prev["close"]) < prior_low if pd.notna(last["prior_low"]) else False
-    add("Fake Breakout (proxy)", "SELL" if broke_up and close < prior_high else "BUY" if broke_dn and close > prior_low else "WAIT", "Simple false-break proxy; review manually")
+    add("Fake Breakout (proxy)", "SELL" if broke_up and close < prior_high else "BUY" if broke_dn and close > prior_low else "WAIT", "Simple false-break proxy")
     add("Trend Alignment", "BUY" if sma20 > sma50 and close > sma20 else "SELL" if sma20 < sma50 and close < sma20 else "WAIT", "SMA20/SMA50 trend filter")
     add("Two-Candle Price Action", "BUY" if close > float(prev["close"]) and close > float(last["open"]) else "SELL" if close < float(prev["close"]) and close < float(last["open"]) else "WAIT", "Basic two-candle momentum proxy")
     add("SMA Touch / Bounce (proxy)", "BUY" if close >= sma20 and float(last["low"]) <= sma20 and sma20 >= sma50 else "SELL" if close <= sma20 and float(last["high"]) >= sma20 and sma20 <= sma50 else "WAIT", "SMA20 touch with trend filter")
@@ -430,9 +375,7 @@ def strategy_signals(data):
     add("Range Supply / Demand (proxy)", "BUY" if close < prior_low + (prior_high-prior_low)*0.25 else "SELL" if close > prior_low + (prior_high-prior_low)*0.75 else "WAIT", f"Range location; midpoint {midpoint:.5f}")
     return df, pd.DataFrame(signals), atr
 
-
 def evaluate_and_close_trades(con, symbol, last_candle):
-    """Evaluate open paper trades against SL/TP or 15-minute Time Exit."""
     trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
     closed = 0
     hi, lo = float(last_candle["high"]), float(last_candle["low"])
@@ -499,7 +442,6 @@ def evaluate_and_close_trades(con, symbol, last_candle):
             closed += 1
     return closed
 
-
 def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, signals, pair_label, mt5_live_enabled):
     open_count = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'").fetchone()[0]
     if open_count >= 3:
@@ -508,7 +450,6 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     entry = float(last_candle["close"])
     stop_distance = max(float(atr) * 1.5, entry * 0.001)
     
-    # High-Yield Bid (1:3 R:R)
     stop = entry - stop_distance if side == "BUY" else entry + stop_distance
     target = entry + stop_distance * 3.0 if side == "BUY" else entry - stop_distance * 3.0
     
@@ -525,8 +466,7 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
 
     con.execute("""INSERT INTO paper_trades(created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note,balance_updated)
                   VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?, 0)""", (utc_now_str(), symbol, timeframe, side, entry, stop, target, qty, note))
-    return True, f"Trade successfully created ({'MT5 Live' if mt5_live_enabled else 'Simulation'} 1:3 R:R)."
-
+    return True, f"Trade successfully created ({'MT5 Live' if mt5_live_enabled else 'Demo Simulator'} 1:3 R:R)."
 
 def background_monitor_worker():
     while True:
@@ -542,13 +482,11 @@ def background_monitor_worker():
         except Exception:
             pass
 
-
 @st.cache_resource
 def start_background_monitor():
     t = threading.Thread(target=background_monitor_worker, daemon=True)
     t.start()
     return True
-
 
 init_db()
 start_background_monitor()
@@ -569,34 +507,33 @@ with st.sidebar:
     timeframe_code = interval
     
     balance_value = float(get_setting("virtual_balance", "10000") or 10000)
-    new_balance = st.number_input("Account capital ($)", min_value=100.0, max_value=1_000_000.0, value=float(balance_value), step=100.0)
-    if st.button("Save capital", use_container_width=True):
+    new_balance = st.number_input("Demo balance ($)", min_value=100.0, max_value=1_000_000.0, value=float(balance_value), step=100.0)
+    if st.button("Save balance", use_container_width=True):
         set_setting("virtual_balance", new_balance)
-        st.success("Capital saved.")
+        st.success("Demo balance saved.")
         
     mt5_live_setting = get_setting("mt5_live", "0") == "1"
-    new_mt5_live = st.toggle("Live Trading Mode (MT5)", value=mt5_live_setting, help="Connects directly to MetaTrader 5 terminal for real/demo execution.")
+    new_mt5_live = st.toggle("Live Trading Mode (MT5)", value=mt5_live_setting, help="ON: Executes real/demo trades on MT5 terminal. OFF: Standard Demo Paper Trading simulator.")
     if new_mt5_live != mt5_live_setting:
         set_setting("mt5_live", "1" if new_mt5_live else "0")
         st.rerun()
 
     auto_enabled = get_setting("auto_paper", "0") == "1"
-    new_auto = st.toggle("Auto trading bot", value=auto_enabled, help="Creates trades automatically based on AI signals.")
+    new_auto = st.toggle("Auto trading bot", value=auto_enabled, help="Creates trades automatically based on signals.")
     if new_auto != auto_enabled:
         set_setting("auto_paper", "1" if new_auto else "0")
         st.rerun()
         
     st.button("🔄 Refresh market data", on_click=st.cache_data.clear, use_container_width=True)
-    st.caption("BIG MAN1 Pro: MT5 Terminal bridge active.")
 
 balance = float(get_setting("virtual_balance", "10000") or 10000)
 mt5_live_mode = get_setting("mt5_live", "0") == "1"
 data, fetch_error = fetch_candles(ticker, interval, period)
 
-analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["📊 Analyzer", "🧠 Strategy Library", "🧾 Trade Journal", "⚙️ Setup & Limits"])
+analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["📊 Analyzer", "🧠 Strategy Library", "🧾 Demo & Live Journal", "⚙️ Setup & Limits"])
 
 with analyzer_tab:
-    st.subheader(f"{pair_label} · {timeframe_label} {('(MT5 Live Active)' if mt5_live_mode else '')}")
+    st.subheader(f"{pair_label} · {timeframe_label} {('(MT5 Live Active)' if mt5_live_mode else '(Demo Simulator Active)')}")
     
     with db_connect() as con:
         all_open_trades = con.execute("SELECT DISTINCT symbol FROM paper_trades WHERE status='OPEN'").fetchall()
@@ -692,7 +629,7 @@ with library_tab:
     ]), use_container_width=True, hide_index=True)
 
 with paper_tab:
-    st.subheader("Trade Journal & MT5 Execution Log (IST Timings)")
+    st.subheader("Demo & Live Trade Journal (IST Timings)")
     
     current_balance_val = float(get_setting("virtual_balance", "10000") or 10000)
     
@@ -710,7 +647,8 @@ with paper_tab:
                    duration AS 'Duration', 
                    status AS 'Status', 
                    pnl AS 'P/L ($)', 
-                   exit_reason AS 'Exit Reason' 
+                   exit_reason AS 'Exit Reason',
+                   strategy_note AS 'Strategy Note'
             FROM paper_trades 
             ORDER BY id DESC
         """, journal_con)
@@ -721,7 +659,7 @@ with paper_tab:
         trades['Exit Time'] = trades['Exit Time (UTC)'].apply(convert_utc_to_ist)
         
         display_trades = trades.drop(columns=['Entry Time (UTC)', 'Exit Time (UTC)'])
-        cols = ['Trade ID', 'Currency Pair', 'Side', 'Entry Price', 'Entry Time', 'Stop Loss', 'Take Profit', 'Exit Price', 'Exit Time', 'Duration', 'Status', 'P/L ($)', 'Exit Reason']
+        cols = ['Trade ID', 'Currency Pair', 'Side', 'Entry Price', 'Entry Time', 'Stop Loss', 'Take Profit', 'Exit Price', 'Exit Time', 'Duration', 'Status', 'P/L ($)', 'Exit Reason', 'Strategy Note']
         existing_cols = [c for c in cols if c in display_trades.columns]
         display_trades = display_trades[existing_cols]
 
@@ -742,7 +680,7 @@ with paper_tab:
         total_realized_pnl = 0.0
 
     bm1, bm2, bm3, bm4, bm5, bm6 = st.columns(6)
-    bm1.metric("Capital", f"${current_balance_val:,.2f}")
+    bm1.metric("Demo Balance", f"${current_balance_val:,.2f}")
     bm2.metric("Realized P/L", f"${total_realized_pnl:,.2f}")
     bm3.metric("Win Rate", f"{win_rate:.1f}%")
     bm4.metric("Profit Factor", f"{profit_factor:.2f}")
@@ -753,14 +691,14 @@ with paper_tab:
         st.info("Abhi koi trade record nahi hai.")
     else:
         st.dataframe(display_trades, use_container_width=True, hide_index=True)
-        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man1_trades_ist.csv", mime="text/csv")
+        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man1_demo_live_trades.csv", mime="text/csv")
 
 with setup_tab:
-    st.subheader("Setup & MT5 Instructions")
+    st.subheader("Setup & Instructions")
     st.markdown("""
-    - **MetaTrader 5 Integration:** Turn on **Live Trading Mode (MT5)** in the sidebar to send orders directly to your MT5 desktop terminal.
-    - **Requirements:** MT5 terminal must be running on your local machine with Python library (`pip install MetaTrader5`).
-    - **Strategy Ensemble:** Uses the classic 8-strategy quantitative voting system.
+    - **Demo Paper Trading Simulator:** By default, the app runs as a paper trading simulator with customizable demo balance.
+    - **MetaTrader 5 Live Integration:** Enable **Live Trading Mode (MT5)** in the sidebar anytime to route trades directly to your MT5 terminal.
+    - **Timezone:** Timestamps are automatically converted to Indian Standard Time (IST).
     """)
     if st.button("Clear cached market data"):
         st.cache_data.clear()
