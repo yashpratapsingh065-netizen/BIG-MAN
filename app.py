@@ -125,11 +125,10 @@ PAIRS = {
     "USD/JPY": "JPY=X",
 }
 
-# Dedicated Timeframe Configurations
 TIMEFRAMES = {
-    "H1 (1 hour)": {"interval": "60m", "period": "1mo", "code": "60m"},
-    "M15 (15 minutes)": {"interval": "15m", "period": "5d", "code": "15m"},
-    "D1 (1 day)": {"interval": "1d", "period": "6mo", "code": "1d"},
+    "H1 (1 hour)": {"interval": "60m", "period": "1mo", "code": "60m", "mt5_tf": "H1"},
+    "M15 (15 minutes)": {"interval": "15m", "period": "5d", "code": "15m", "mt5_tf": "M15"},
+    "D1 (1 day)": {"interval": "1d", "period": "6mo", "code": "1d", "mt5_tf": "D1"},
 }
 
 def utc_now_str():
@@ -228,8 +227,44 @@ def con_set_setting(con, key, value):
     else:
         con.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, str(value)))
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_candles(ticker, interval, period):
+def get_mt5_timeframe(tf_code):
+    if not MT5_AVAILABLE:
+        return None
+    tf_map = {
+        "60m": mt5.TIMEFRAME_H1,
+        "15m": mt5.TIMEFRAME_M15,
+        "1d": mt5.TIMEFRAME_D1
+    }
+    return tf_map.get(tf_code, mt5.TIMEFRAME_M15)
+
+# Direct MT5 Ticks & Candle Sync Data Fetcher
+def fetch_candles(ticker, interval, period, symbol_label=""):
+    mt5_live = get_setting("mt5_live", "0") == "1"
+    if mt5_live and MT5_AVAILABLE:
+        if mt5.initialize():
+            raw_symbol = symbol_label.replace("/", "") if symbol_label else ticker.replace("=X", "")
+            mt5_symbol = raw_symbol
+            symbol_info = mt5.symbol_info(mt5_symbol)
+            if symbol_info is None:
+                mt5_symbol = raw_symbol + ".m"
+                symbol_info = mt5.symbol_info(mt5_symbol)
+            
+            if symbol_info is not None:
+                if not symbol_info.visible:
+                    mt5.symbol_select(mt5_symbol, True)
+                
+                mt5_tf = get_mt5_timeframe(interval)
+                rates = mt5.copy_rates_from_pos(mt5_symbol, mt5_tf, 0, 300)
+                if rates is not None and len(rates) > 0:
+                    df = pd.DataFrame(rates)
+                    df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+                    df = df.rename(columns={'tick_volume': 'volume'})
+                    df = df[['time', 'open', 'high', 'low', 'close', 'volume']]
+                    mt5.shutdown()
+                    return df, None
+            mt5.shutdown()
+
+    # Fallback to web data feeds
     try:
         raw = yf.download(
             ticker,
@@ -240,14 +275,14 @@ def fetch_candles(ticker, interval, period):
             threads=False,
         )
         if raw is None or raw.empty:
-            return pd.DataFrame(), f"Yahoo Finance ne {ticker} ke liye data nahi diya."
+            return pd.DataFrame(), f"Data stream unavailable for {ticker}."
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).strip() for c in raw.columns]
         required = ["Open", "High", "Low", "Close"]
         missing = [col for col in required if col not in raw.columns]
         if missing:
-            return pd.DataFrame(), f"Market data mein required columns missing hain: {', '.join(missing)}"
+            return pd.DataFrame(), f"Missing columns: {', '.join(missing)}"
         data = raw.reset_index()
         time_col = "Datetime" if "Datetime" in data.columns else "Date"
         if time_col not in data.columns:
@@ -258,12 +293,28 @@ def fetch_candles(ticker, interval, period):
             data[col] = pd.to_numeric(data[col], errors="coerce")
         data = data.dropna(subset=["time", "open", "high", "low", "close"]).sort_values("time").tail(500).reset_index(drop=True)
         if data.empty:
-            return pd.DataFrame(), "Market data mila, lekin usable candles nahi mile."
+            return pd.DataFrame(), "No valid price records."
         return data, None
     except Exception as exc:
         return pd.DataFrame(), f"Market data fetch error: {type(exc).__name__}: {exc}"
 
-def fetch_fresh_exit_candle(symbol):
+def fetch_fresh_exit_candle(symbol, symbol_label=""):
+    mt5_live = get_setting("mt5_live", "0") == "1"
+    if mt5_live and MT5_AVAILABLE:
+        if mt5.initialize():
+            raw_symbol = symbol_label.replace("/", "") if symbol_label else symbol.replace("=X", "")
+            mt5_symbol = raw_symbol
+            symbol_info = mt5.symbol_info(mt5_symbol)
+            if symbol_info is None:
+                mt5_symbol = raw_symbol + ".m"
+                symbol_info = mt5.symbol_info(mt5_symbol)
+            if symbol_info is not None:
+                tick = mt5.symbol_info_tick(mt5_symbol)
+                if tick is not None:
+                    mt5.shutdown()
+                    return {"close": tick.bid, "high": tick.ask, "low": tick.bid}, None
+            mt5.shutdown()
+
     try:
         raw = yf.download(symbol, interval="1m", period="1d", auto_adjust=False, progress=False, threads=False)
         if raw is None or raw.empty:
@@ -392,7 +443,7 @@ def strategy_signals(data):
     
     return df, pd.DataFrame(signals), atr
 
-def evaluate_and_close_trades(con, symbol, last_candle):
+def evaluate_and_close_trades(con, symbol, last_candle, pair_label=""):
     trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
     closed = 0
     hi, lo = float(last_candle["high"]), float(last_candle["low"])
@@ -424,7 +475,7 @@ def evaluate_and_close_trades(con, symbol, last_candle):
         # 15m 9s (909 seconds) Safe Time Exit
         elapsed_seconds = (now_utc - created_time.to_pydatetime()).total_seconds()
         if exit_price is None and elapsed_seconds >= 909.0:
-            fresh_candle, err = fetch_fresh_exit_candle(trade["symbol"])
+            fresh_candle, err = fetch_fresh_exit_candle(trade["symbol"], pair_label)
             if fresh_candle is not None and "close" in fresh_candle:
                 exit_price = float(fresh_candle["close"])
                 reason = "Time Exit (15m 9s)"
@@ -568,7 +619,7 @@ with st.sidebar:
         st.success("Demo balance saved.")
         
     mt5_live_setting = get_setting("mt5_live", "0") == "1"
-    new_mt5_live = st.toggle("Live Trading Mode (MT5)", value=mt5_live_setting, help="ON: Executes real/demo trades on MT5 terminal. OFF: Standard Demo Paper Trading simulator.")
+    new_mt5_live = st.toggle("Live Trading Mode (MT5)", value=mt5_live_setting, help="ON: Fetches live ticks directly from MT5 terminal and routes orders.")
     if new_mt5_live != mt5_live_setting:
         set_setting("mt5_live", "1" if new_mt5_live else "0")
         st.rerun()
@@ -587,9 +638,8 @@ mt5_live_mode = get_setting("mt5_live", "0") == "1"
 analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["📊 Analyzer", "🧠 Strategy Library", "🧾 Demo & Live Journal", "⚙️ Setup & Limits"])
 
 with analyzer_tab:
-    st.subheader(f"{pair_label} — Multi-Timeframe Analysis & Execution {('(MT5 Live Active)' if mt5_live_mode else '(Demo Simulator Active)')}")
+    st.subheader(f"{pair_label} — Multi-Timeframe Analysis & Execution {('(MT5 Direct Feed Active)' if mt5_live_mode else '(Demo Simulator Active)')}")
     
-    # Sub-tabs for strict Timeframe separation (H1, M15, D1)
     tf_tabs = st.tabs(["🕒 H1 (1 hour)", "⚡ M15 (15 minutes)", "📅 D1 (1 day)"])
     
     for tf_idx, (tf_name, tf_info) in enumerate(TIMEFRAMES.items()):
@@ -598,15 +648,15 @@ with analyzer_tab:
             period = tf_info["period"]
             timeframe_code = tf_info["code"]
             
-            data, fetch_error = fetch_candles(ticker, interval, period)
+            data, fetch_error = fetch_candles(ticker, interval, period, pair_label)
             
             with db_connect() as con:
                 all_open_trades = con.execute("SELECT DISTINCT symbol FROM paper_trades WHERE status='OPEN'").fetchall()
                 for ot in all_open_trades:
                     sym = ot["symbol"]
-                    s_data, s_err = fetch_candles(sym, interval, period)
+                    s_data, s_err = fetch_candles(sym, interval, period, pair_label)
                     if not s_data.empty:
-                        evaluate_and_close_trades(con, sym, s_data.iloc[-1])
+                        evaluate_and_close_trades(con, sym, s_data.iloc[-1], pair_label)
 
             if fetch_error or data.empty:
                 st.error(fetch_error or f"Market data unavailable for {tf_name}.")
@@ -629,7 +679,7 @@ with analyzer_tab:
                     last_trade_candles = {}
                     
                 with db_connect() as con:
-                    closed_count = evaluate_and_close_trades(con, ticker, last)
+                    closed_count = evaluate_and_close_trades(con, ticker, last, pair_label)
                     if new_auto:
                         if signal in ("BUY", "SELL"):
                             if last_trade_candles.get(pair_time_key) == candle_time:
@@ -647,7 +697,7 @@ with analyzer_tab:
                     else:
                         st.caption(f"[{tf_name}] Auto Trading OFF hai.")
 
-                # --- ISOLATED MANUAL EXECUTION PANEL PER TIMEFRAME ---
+                # --- MANUAL EXECUTION PANEL PER TIMEFRAME ---
                 with st.expander(f"⚡ Manual Trade Execution Panel ({tf_name})", expanded=True):
                     mc1, mc2, mc3 = st.columns(3)
                     manual_side = mc1.selectbox("Select Direction", ["BUY", "SELL"], key=f"manual_side_{timeframe_code}")
@@ -718,7 +768,7 @@ with paper_tab:
             col_b.write(f"Entry: `{row['entry']}`")
             col_c.write(f"SL: `{row['stop']}` | TP: `{row['target']}`")
             if col_d.button(f"Close Trade #{row['id']}", key=f"manual_close_{row['id']}"):
-                fresh_c, err = fetch_fresh_exit_candle(row['symbol'])
+                fresh_c, err = fetch_fresh_exit_candle(row['symbol'], pair_label)
                 exit_price_val = float(fresh_c["close"]) if fresh_c is not None and "close" in fresh_c else float(row['entry'])
                 ok, msg = manual_close_trade(row['id'], exit_price_val, "Manual Exit")
                 if ok:
@@ -796,10 +846,9 @@ with paper_tab:
 with setup_tab:
     st.subheader("Setup & Instructions")
     st.markdown("""
-    - **BIG MAN2 Pro:** Balanced time exit (15m 9s), manual buy/sell panel per timeframe, and manual trade management enabled.
-    - **Timeframe Separation:** View distinct H1, M15, and D1 charts and signals inside the **Analyzer** tab sub-tabs.
-    - **MetaTrader 5 Live Integration:** Enable **Live Trading Mode (MT5)** in the sidebar anytime to route orders directly to your MT5 terminal.
-    - **Timezone:** Timestamps are automatically converted to Indian Standard Time (IST).
+    - **BIG MAN2 Pro:** Live tick synchronization directly from MT5 desktop terminal when Live Trading Mode is enabled.
+    - **Timeframe Separation:** Distinct H1, M15, and D1 execution modules with independent chart rendering.
+    - **MetaTrader 5 Live Integration:** Enable **Live Trading Mode (MT5)** in sidebar to route orders and mirror broker rates in real-time.
     """)
     if st.button("Clear cached market data"):
         st.cache_data.clear()
