@@ -10,11 +10,11 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-# BIG MAN2 Forex AI Pro — 9-Strategy SMC & Price Action Master Edition
+# BIG MAN2 Forex AI Pro — 10 Master Strategy Edition (Original + YouTube Channel s1-s6)
 # Paper-trading only. Institutional heuristic rule engine.
 
 st.set_page_config(
-    page_title="BIG MAN2 — Forex AI Pro (9-Strategy SMC)",
+    page_title="BIG MAN2 — Forex AI Pro (10 Master Strategies)",
     page_icon="📈",
     layout="wide",
 )
@@ -52,8 +52,8 @@ div[data-testid="stMetric"] { background:#111827; border:1px solid #263244; padd
 """, unsafe_allow_html=True)
 
 st.markdown(
-    '<div class="brand"><h1>🐂⚡ BIG MAN2 — Forex AI Pro (9-Strategy SMC Edition)</h1>'
-    '<p>Price Action • Smart Money Concepts (IDM, FVG, S&D, Equilibrium) • Paper Trading</p></div>',
+    '<div class="brand"><h1>🐂⚡ BIG MAN2 — Forex AI Pro (10 Master Strategies Edition)</h1>'
+    '<p>Original Heuristics + Price Lesson Hindi (s1-s6 SMC & Price Action) • Paper Trading</p></div>',
     unsafe_allow_html=True,
 )
 
@@ -216,8 +216,9 @@ def fetch_candles(pair_label, tf_info):
 
 def strategy_signals(data):
     """
-    Evaluates all 9 institutional Price Action and SMC strategies 
-    from the Price Lesson Hindi channel framework.
+    Evaluates all 10 Strategies: 
+    Original 8 (Support/Resistance, Fib/Equilibrium, Breakout, IDM Trap, Trend Alignment, 
+    Engulfing, FVG, Supply/Demand) + YouTube Channel s1 & s2 advanced momentum metrics.
     """
     df = data.copy().sort_values("time").reset_index(drop=True)
     df["sma20"] = df["close"].rolling(20, min_periods=5).mean()
@@ -230,7 +231,6 @@ def strategy_signals(data):
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else last
     prev2 = df.iloc[-3] if len(df) > 2 else prev
-    prev3 = df.iloc[-4] if len(df) > 3 else prev2
     
     close = float(last["close"])
     open_p = float(last["open"])
@@ -248,53 +248,65 @@ def strategy_signals(data):
     def add(name, vote, note):
         signals.append({"Strategy": name, "Signal": vote, "Reason": note})
 
-    # Strategy 1: Multi-Timeframe Alignment (s1)
-    s1_vote = "BUY" if sma20 > sma50 and close > sma20 else "SELL" if sma20 < sma50 and close < sma20 else "WAIT"
-    add("1. Multi-Timeframe Trend (s1)", s1_vote, "Higher & behavior timeframe structural alignment")
+    # 1. Support / Resistance (Original)
+    add("1. Support / Resistance",
+        "BUY" if close > prior_low + width * 0.65 else ("SELL" if close < prior_low + width * 0.35 else "WAIT"),
+        "Price position inside recent 20-candle range")
 
-    # Strategy 2: Impulse vs. Corrective Moves (s2)
-    recent_body = abs(close - open_p)
-    prev_body = abs(float(prev["close"]) - float(prev["open"]))
-    s2_vote = "BUY" if recent_body > prev_body and close > open_p else "SELL" if recent_body > prev_body and close < open_p else "WAIT"
-    add("2. Impulse vs. Corrective Shift (s2)", s2_vote, "Momentum expansion check relative to prior pullbacks")
-
-    # Strategy 3: Support & Resistance Role Reversal (s4)
-    s4_vote = "BUY" if close > prior_low + width * 0.7 else ("SELL" if close < prior_low + width * 0.3 else "WAIT")
-    add("3. Support & Resistance Reversal (s4)", s4_vote, "Key S&R zone reaction and role reversal")
-
-    # Strategy 4: Candlestick Confirmation / Engulfing (s3)
-    is_bull_engulf = close > float(prev["close"]) and close > open_p and float(prev["close"]) < float(prev["open"])
-    is_bear_engulf = close < float(prev["close"]) and close < open_p and float(prev["close"]) > float(prev["open"])
-    s3_vote = "BUY" if is_bull_engulf else ("SELL" if is_bear_engulf else "WAIT")
-    add("4. Candlestick Confirmation (s3)", s3_vote, "Doji or Indecision followed by strong Engulfing candle")
-
-    # Strategy 5: Smart Money IDM Trap / Sweep (s5)
-    prev_close = float(prev["close"])
-    broke_up = prev_close > prior_high
-    broke_dn = prev_close < prior_low
-    s5_vote = "SELL" if broke_up and close < prior_high else ("BUY" if broke_dn and close > prior_low else "WAIT")
-    add("5. Smart Money IDM Trap (s5)", s5_vote, "Liquidity sweep / inducement reversal heuristic")
-
-    # Strategy 6: Fair Value Gap (FVG) 50% Equilibrium (s5-fvg)
-    bullish_fvg = float(prev2["high"]) < float(last["low"])
-    bearish_fvg = float(prev2["low"]) > float(last["high"])
-    s5fvg_vote = "BUY" if bullish_fvg else ("SELL" if bearish_fvg else "WAIT")
-    add("6. Fair Value Gap 50% Tap (s5-fvg)", s5fvg_vote, "Institutional 3-candle imbalance and equilibrium tap")
-
-    # Strategy 7: Supply & Demand Zone Test (s6)
-    s6_vote = "BUY" if close < prior_low + width * 0.25 else ("SELL" if close > prior_low + width * 0.75 else "WAIT")
-    add("7. Supply & Demand Zone Test (s6)", s6_vote, "Aggressive origin zone & wick rejection test")
-
-    # Strategy 8: Fibonacci Equilibrium (0.5 / 0.618) Retracement (s6 & s5-fvg)
+    # 2. Fibonacci & Equilibrium 50% (Original)
     fib_low = prior_low + width * 0.382
     fib_high = prior_low + width * 0.618
     equilibrium = (prior_high + prior_low) / 2
-    fib_vote = "BUY" if close > equilibrium and close >= fib_low else ("SELL" if close < equilibrium and close <= fib_high else "WAIT")
-    add("8. Fibonacci Equilibrium (0.5/0.618)", fib_vote, f"Discount/Premium zone midpoint {equilibrium:.5f}")
+    add("2. Fibonacci & Equilibrium (50%)",
+        "BUY" if close > equilibrium and close >= fib_low else ("SELL" if close < equilibrium and close <= fib_high else "WAIT"),
+        f"Equilibrium midpoint {equilibrium:.5f}")
 
-    # Strategy 9: Moving Average Trend Confluence Filter (s4)
-    ma_vote = "BUY" if sma20 > sma50 else "SELL" if sma20 < sma50 else "WAIT"
-    add("9. MA Trend Confluence Filter", ma_vote, "Institutional Moving Average trend crossover confirmation")
+    # 3. Breakout Strategy (Original)
+    add("3. Breakout Strategy",
+        "BUY" if close > prior_high else ("SELL" if close < prior_low else "WAIT"),
+        "Close breaking previous 20-candle high/low range")
+
+    # 4. SMC Inducement (IDM) Trap (Original / s5)
+    prev_close = float(prev["close"])
+    broke_up = prev_close > prior_high
+    broke_dn = prev_close < prior_low
+    add("4. SMC Inducement (IDM) Trap",
+        "SELL" if broke_up and close < prior_high else ("BUY" if broke_dn and close > prior_low else "WAIT"),
+        "Possible liquidity sweep / trap heuristic")
+
+    # 5. Trend Alignment / Moving Average Filter (Original)
+    add("5. Trend Alignment (SMA20/50)",
+        "BUY" if sma20 > sma50 and close > sma20 else ("SELL" if sma20 < sma50 and close < sma20 else "WAIT"),
+        "SMA20/SMA50 institutional trend filter")
+
+    # 6. Two-Candle Price Action / Engulfing (Original / s3)
+    is_bull_engulf = close > prev_close and close > open_p and prev_close < float(prev["open"])
+    is_bear_engulf = close < prev_close and close < open_p and prev_close > float(prev["open"])
+    add("6. Two-Candle Engulfing (s3)",
+        "BUY" if is_bull_engulf else ("SELL" if is_bear_engulf else "WAIT"),
+        "Engulfing-style candle confirmation")
+
+    # 7. Fair Value Gap - FVG (Original / s5-fvg)
+    bullish_fvg = float(prev2["high"]) < float(last["low"])
+    bearish_fvg = float(prev2["low"]) > float(last["high"])
+    add("7. Fair Value Gap (FVG)",
+        "BUY" if bullish_fvg else ("SELL" if bearish_fvg else "WAIT"),
+        "Three-candle imbalance gap heuristic")
+
+    # 8. Supply & Demand Zones (Original / s6)
+    add("8. Supply & Demand Zones",
+        "BUY" if close < prior_low + width * 0.25 else ("SELL" if close > prior_low + width * 0.75 else "WAIT"),
+        "Range-extreme supply & demand zone heuristic")
+
+    # 9. Multi-Timeframe Trend Alignment (YouTube s1)
+    s1_vote = "BUY" if sma20 > sma50 and close > sma20 else ("SELL" if sma20 < sma50 and close < sma20 else "WAIT")
+    add("9. Multi-Timeframe Trend (s1)", s1_vote, "Higher & behavior timeframe structural alignment")
+
+    # 10. Impulse vs. Corrective Shift (YouTube s2)
+    recent_body = abs(close - open_p)
+    prev_body = abs(float(prev["close"]) - float(prev["open"]))
+    s2_vote = "BUY" if recent_body > prev_body and close > open_p else ("SELL" if recent_body > prev_body and close < open_p else "WAIT")
+    add("10. Impulse vs Corrective Shift (s2)", s2_vote, "Momentum expansion vs pullback size check")
 
     return df, pd.DataFrame(signals), atr
 
@@ -315,7 +327,7 @@ def create_paper_trade(pair, timeframe, side, last, atr, analyzed_df=None, votes
         
         entry = float(last["close"])
         
-        # Institutional structural Stop Loss & Take Profit calculations
+        # Structural Stop Loss & Take Profit calculations
         if analyzed_df is not None and len(analyzed_df) >= 20:
             recent_high = float(analyzed_df["high"].iloc[-20:].max())
             recent_low = float(analyzed_df["low"].iloc[-20:].min())
@@ -333,10 +345,10 @@ def create_paper_trade(pair, timeframe, side, last, atr, analyzed_df=None, votes
 
         stop_distance = abs(entry - stop)
         balance = float(get_setting("virtual_balance", "10000") or 10000)
-        risk_cash = max(1.0, balance * 0.01) # Risk 1% per trade
+        risk_cash = max(1.0, balance * 0.01)
         quantity = min(risk_cash / stop_distance, 100000.0) if stop_distance > 0 else 1000.0
         
-        note = ", ".join(votes.loc[votes["Signal"] == side, "Strategy"].tolist()) if votes is not None else "9-Strategy SMC Execution"
+        note = ", ".join(votes.loc[votes["Signal"] == side, "Strategy"].tolist()) if votes is not None else "10 Master Strategies Execution"
         
         con.execute(
             """INSERT INTO paper_trades
@@ -397,7 +409,7 @@ init_db()
 with st.sidebar:
     st.header("Settings & Confluence")
     pair_label = st.selectbox("Currency pair", list(PAIRS.keys()))
-    signal_mode = st.selectbox("Signal Rigidity", ["Strict Confluence (6/9 Votes)", "Aggressive (4/9 Votes)"])
+    signal_mode = st.selectbox("Signal Rigidity", ["Strict Confluence (6/10 Votes)", "Aggressive (4/10 Votes)"])
     threshold = 6 if "Strict" in signal_mode else 4
     current_balance = float(get_setting("virtual_balance", "10000") or 10000)
     balance_input = st.number_input("Demo balance ($)", min_value=100.0, max_value=1_000_000.0, value=current_balance, step=100.0)
@@ -405,22 +417,22 @@ with st.sidebar:
         set_setting("virtual_balance", balance_input)
         st.success("Demo balance saved.")
     auto_setting = get_setting("auto_paper", "0") == "1"
-    auto_toggle = st.toggle("Auto paper trading", value=auto_setting, help="Creates simulated trades when 9-strategy confluence qualifies. Paper-trading only.")
+    auto_toggle = st.toggle("Auto paper trading", value=auto_setting, help="Creates simulated trades when 10-strategy confluence qualifies.")
     if auto_toggle != auto_setting:
         set_setting("auto_paper", "1" if auto_toggle else "0")
         st.rerun()
-    st.caption("All 9 Price Action & SMC strategies active.")
+    st.caption("All 10 Original & YouTube SMC strategies active.")
     if st.button("🔄 Refresh market data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
 balance = float(get_setting("virtual_balance", "10000") or 10000)
 analyzer_tab, library_tab, journal_tab, setup_tab = st.tabs(
-    ["📊 9-Strategy Analyzer", "🧠 Strategy Library", "🧾 Paper Journal", "⚙️ Setup"]
+    ["📊 10-Strategy Analyzer", "🧠 Strategy Library", "🧾 Paper Journal", "⚙️ Setup"]
 )
 
 with analyzer_tab:
-    st.subheader(f"{pair_label} — Multi-Timeframe SMC Analysis")
+    st.subheader(f"{pair_label} — 10 Master Strategies Analysis")
     tf_tabs = st.tabs(list(TIMEFRAMES.keys()))
     for idx, (tf_name, tf_info) in enumerate(TIMEFRAMES.items()):
         with tf_tabs[idx]:
@@ -431,28 +443,28 @@ with analyzer_tab:
                 continue
             st.caption(f"Data source: {source} • Latest candle: {convert_utc_to_ist(data.iloc[-1]['time'])}")
             if len(data) < 3:
-                st.warning("Not enough candles to calculate 9-strategy indicators.")
+                st.warning("Not enough candles to calculate 10-strategy indicators.")
                 continue
             analyzed, votes, atr = strategy_signals(data)
             last = analyzed.iloc[-1]
             signal, buys, sells = aggregate_signal(votes, threshold)
             auto_now = get_setting("auto_paper", "0") == "1"
             if auto_now and signal in ("BUY", "SELL"):
-                candle_key = f"auto_done_9s_{pair_label}_{tf_info['code']}"
+                candle_key = f"auto_done_10s_{pair_label}_{tf_info['code']}"
                 candle_time = pd.Timestamp(last["time"]).isoformat()
                 if get_setting(candle_key, "") != candle_time:
                     made, message = create_paper_trade(pair_label, tf_info["code"], signal, last, atr, analyzed, votes)
                     if made:
                         set_setting(candle_key, candle_time)
-                        st.success("Auto 9-Strategy trade: " + message)
+                        st.success("Auto 10-Strategy trade: " + message)
                     else:
                         st.warning(message)
             auto_evaluate_open_trades(pair_label, data)
 
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric(f"9-Strategy Signal", signal)
-            m2.metric("BUY Votes", f"{buys}/9")
-            m3.metric("SELL Votes", f"{sells}/9")
+            m1.metric(f"10-Strategy Signal", signal)
+            m2.metric("BUY Votes", f"{buys}/10")
+            m3.metric("SELL Votes", f"{sells}/10")
             m4.metric("Latest Close", f"{float(last['close']):.5f}")
 
             chart = go.Figure()
@@ -470,29 +482,30 @@ with analyzer_tab:
             )
             st.plotly_chart(chart, use_container_width=True)
 
-            st.subheader("All 9 Price Action & SMC Strategy Votes")
+            st.subheader("All 10 Strategy Votes")
             st.dataframe(votes, use_container_width=True, hide_index=True)
 
             with st.expander(f"Manual paper trade — {tf_info['code']}"):
                 direction = st.selectbox("Direction", ["BUY", "SELL"], key=f"direction_{tf_info['code']}")
-                if st.button("Execute 9-Strategy Trade", key=f"create_{tf_info['code']}", use_container_width=True):
+                if st.button("Execute 10-Strategy Trade", key=f"create_{tf_info['code']}", use_container_width=True):
                     ok, msg = create_paper_trade(pair_label, tf_info["code"], direction, last, atr, analyzed, votes)
                     (st.success if ok else st.error)(msg)
 
 with library_tab:
-    st.subheader("Complete 9-Strategy Library (Price Lesson Hindi)")
+    st.subheader("Complete 10 Master Strategies Library")
     st.dataframe(pd.DataFrame([
-        {"Strategy #1": "Multi-Timeframe Trend (s1)", "Core Focus": "Aligns 4H direction, 1H behavior, and 15M entry timeframe."},
-        {"Strategy #2": "Impulse vs. Corrective Shift (s2)", "Core Focus": "Measures momentum speed and size to identify trend reversals."},
-        {"Strategy #3": "Support & Resistance Reversal (s4)", "Core Focus": "Key structural zones with role reversal and multiple rejections."},
-        {"Strategy #4": "Candlestick Confirmation / Engulfing (s3)", "Core Focus": "Doji indecision followed by strong engulfing candle confirmation."},
-        {"Strategy #5": "Smart Money IDM Trap (s5)", "Core Focus": "Liquidity sweeps and inducement fakeouts before true continuation."},
-        {"Strategy #6": "Fair Value Gap 50% Equilibrium (s5-fvg)", "Core Focus": "3-candle imbalance zone with entry at the 50% discount/premium midpoint."},
-        {"Strategy #7": "Supply & Demand Zone Test (s6)", "Core Focus": "Aggressive origin candles and wick rejection test areas."},
-        {"Strategy #8": "Fibonacci Equilibrium (0.5/0.618)", "Core Focus": "Discount and premium range midpoint retracement levels."},
-        {"Strategy #9": "Moving Average Trend Confluence", "Core Focus": "Institutional SMA20/SMA50 crossover trend alignment filter."}
+        {"Strategy #1": "Support / Resistance", "Purpose": "Recent range structural levels"},
+        {"Strategy #2": "Fibonacci & Equilibrium (50%)", "Purpose": "Range midpoint and discount/premium heuristic"},
+        {"Strategy #3": "Breakout Strategy", "Purpose": "Previous range high/low break"},
+        {"Strategy #4": "SMC Inducement (IDM) Trap", "Purpose": "Possible liquidity sweep heuristic"},
+        {"Strategy #5": "Trend Alignment (SMA20/50)", "Purpose": "SMA20/SMA50 trend filter"},
+        {"Strategy #6": "Two-Candle Engulfing (s3)", "Purpose": "Engulfing-style candle confirmation"},
+        {"Strategy #7": "Fair Value Gap (FVG)", "Purpose": "Three-candle gap imbalance heuristic"},
+        {"Strategy #8": "Supply & Demand Zones (s6)", "Purpose": "Range-extreme supply & demand zones"},
+        {"Strategy #9": "Multi-Timeframe Trend (s1)", "Purpose": "Higher & behavior timeframe alignment"},
+        {"Strategy #10": "Impulse vs Corrective Shift (s2)", "Purpose": "Momentum expansion vs pullback size check"}
     ]), use_container_width=True, hide_index=True)
-    st.caption("Based on institutional price action and Smart Money Concepts taught across the Price Lesson Hindi series.")
+    st.caption("Combines the original project's foundational strategies with the advanced YouTube Price Action & SMC episode concepts.")
 
 with journal_tab:
     st.subheader("Active Open Trades — Manual Management")
@@ -545,7 +558,7 @@ with journal_tab:
         st.download_button(
             "Download paper journal CSV",
             trades[display_cols].to_csv(index=False).encode("utf-8"),
-            file_name="big_man2_9strategy_journal.csv",
+            file_name="big_man2_10strategy_journal.csv",
             mime="text/csv",
         )
 
@@ -553,7 +566,7 @@ with setup_tab:
     st.subheader("Setup & Institutional Rules")
     st.markdown("""
 - Configure your Twelve Data API key under Streamlit Secrets: `TWELVE_DATA_API_KEY = "your_actual_key"`
-- **9-Strategy Confluence:** The bot aggregates votes across all 9 Price Action & SMC methodologies (Multi-timeframe, Impulse/Corrective, S&R, Engulfing, IDM traps, FVG equilibrium, Supply & Demand, Fibonacci, and MA filters).
+- **10 Master Strategy Confluence:** Aggregates votes across all foundational indicators (Breakout, Support/Resistance, S&D, FVG) and advanced YouTube Price Lesson Hindi concepts (Multi-timeframe `s1`, Impulse/Corrective `s2`, Engulfing `s3`, IDM traps `s5`).
 - **Structural Stop-Loss:** SL is placed safely beyond recent 20-candle swing highs/lows with ATR buffer to prevent market noise hunting.
 - **Paper Trading Only:** This version does not send live broker orders. Export your CSV journal periodically.
 """)
