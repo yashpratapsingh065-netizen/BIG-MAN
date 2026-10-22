@@ -28,7 +28,7 @@ try:
 except OSError:
     DB_PATH = Path("/tmp") / "big_man2.db"
 
-st.set_page_config(page_title="BIG MAN2 — SD & Multi-Timeframe Forex AI Pro", page_icon="📈", layout="wide")
+st.set_page_config(page_title="BIG MAN2 — Ultimate Forex AI Pro (SMC, SD & MTF)", page_icon="📈", layout="wide")
 
 # ==========================================
 # EXPERT UI: PREMIUM DARK MODE & BRANDING CSS
@@ -113,8 +113,8 @@ st.markdown("""
 <div class="brand-header">
     <div class="brand-logo">🐂⚡</div>
     <div>
-        <div class="brand-title">BIG MAN2 — SD & Multi-Timeframe Forex AI Pro</div>
-        <div class="brand-subtitle">Supply & Demand + Multi Timeframe Analysis + MT5 Live Integration</div>
+        <div class="brand-title">BIG MAN2 — Ultimate Forex AI Pro (SMC, SD & MTF)</div>
+        <div class="brand-subtitle">Supply & Demand + Multi Timeframe Analysis + SMC Suite + MT5 Live Integration</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -384,7 +384,7 @@ def execute_mt5_live_trade(symbol_label, side, volume, stop_loss, take_profit):
         "tp": float(take_profit),
         "deviation": 20,
         "magic": 234000,
-        "comment": "BIG MAN2 SD Pro",
+        "comment": "BIG MAN2 Ultimate Pro",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
@@ -399,7 +399,7 @@ def execute_mt5_live_trade(symbol_label, side, volume, stop_loss, take_profit):
     return True, f"MT5 Live Order Executed! Ticket: {result.order}"
 
 # =========================================================
-# REPLACED STRATEGIES: SUPPLY & DEMAND + MULTI TIMEFRAME SUITE
+# UNIFIED STRATEGY SUITE (SMC + PRICE ACTION + SD + MTF)
 # =========================================================
 def strategy_signals(data):
     df = data.copy()
@@ -413,7 +413,6 @@ def strategy_signals(data):
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) > 1 else last
     prev2 = df.iloc[-3] if len(df) > 2 else prev
-    prev3 = df.iloc[-4] if len(df) > 3 else prev2
     
     close = float(last["close"])
     atr = float(last["atr14"]) if pd.notna(last["atr14"]) else close * 0.001
@@ -427,44 +426,42 @@ def strategy_signals(data):
     def add(name, vote, note):
         signals.append({"Strategy": name, "Signal": vote, "Reason": note})
 
-    # 1. SD Momentum Candles (3 Consecutive Bull/Bear Candles)
-    is_3bull = (float(last["close"]) > float(last["open"])) and (float(prev["close"]) > float(prev["open"])) and (float(prev2["close"]) > float(prev2["open"]))
-    is_3bear = (float(last["close"]) < float(last["open"])) and (float(prev["close"]) < float(prev["open"])) and (float(prev2["close"]) < float(prev2["open"]))
-    add("SD 3-Momentum Candles", "BUY" if is_3bull else "SELL" if is_3bear else "WAIT", "3 consecutive aggressive momentum candles detection")
-
-    # 2. SD Consolidation Breakout & Retest Zone
-    in_consolidation = (prior_high - prior_low) < (atr * 4.0)
-    add("SD Consolidation Zone", "BUY" if in_consolidation and close > prior_high else "SELL" if in_consolidation and close < prior_low else "WAIT", "Consolidation zone retest & breakout")
-
-    # 3. SD Long Wicks Rejection Level
-    body_size = abs(close - float(last["open"]))
-    lower_wick = min(close, float(last["open"])) - float(last["low"])
-    upper_wick = float(last["high"]) - max(close, float(last["open"]))
-    add("SD Long Wicks Rejection", "BUY" if lower_wick > body_size * 2.0 else "SELL" if upper_wick > body_size * 2.0 else "WAIT", "Long wick rejection at demand/supply zone")
-
-    # 4. SD Fibonacci Golden Zone (0.5 & 0.618)
-    fib_50 = prior_low + (prior_high - prior_low) * 0.5
-    fib_618 = prior_low + (prior_high - prior_low) * 0.618
-    add("SD Fibonacci Golden Zone", "BUY" if close >= fib_50 and close <= fib_618 and close > float(last["open"]) else "SELL" if close <= fib_50 and close >= (prior_low + (prior_high - prior_low) * 0.382) and close < float(last["open"]) else "WAIT", "Fibonacci 0.5 & 0.618 retest zone")
-
-    # 5. Multi Timeframe Alignment (4H/1H/15m Trend Alignment)
-    add("MTF Trend Alignment", "BUY" if close > sma20 and sma20 > sma50 else "SELL" if close < sma20 and sma20 < sma50 else "WAIT", "Direction & behavior trend alignment filter")
-
-    # 6. SD Engulfing Confirmation
-    is_bull_engulf = close > float(prev["close"]) and close > float(last["open"]) and float(prev["close"]) < float(prev["open"])
-    is_bear_engulf = close < float(prev["close"]) and close < float(last["open"]) and float(prev["close"]) > float(prev["open"])
-    add("SD Engulfing Confirmation", "BUY" if is_bull_engulf else "SELL" if is_bear_engulf else "WAIT", "Bullish/Bearish engulfing confirmation candle at zone")
-
-    # 7. SD Liquidity Sweep / Trap
+    # 1. Support / Resistance
+    add("Support / Resistance", "BUY" if close > prior_low + (prior_high-prior_low)*0.65 else "SELL" if close < prior_low + (prior_high-prior_low)*0.35 else "WAIT", "Price position inside recent range")
+    
+    # 2. Fibonacci & Equilibrium (50%)
+    fib_low = prior_low + (prior_high-prior_low)*0.382
+    fib_high = prior_low + (prior_high-prior_low)*0.618
+    equilibrium = (prior_high + prior_low) / 2
+    add("Fibonacci & Equilibrium (50%)", "BUY" if close > equilibrium and close >= fib_low else "SELL" if close < equilibrium and close <= fib_high else "WAIT", f"Equilibrium midpoint {equilibrium:.5f}")
+    
+    # 3. Breakout
+    add("Breakout", "BUY" if close > prior_high else "SELL" if close < prior_low else "WAIT", "Close compared with previous range breakout")
+    
+    # 4. SMC Inducement (IDM) Trap
     broke_up = float(prev["close"]) > prior_high if pd.notna(last["prior_high"]) else False
     broke_dn = float(prev["close"]) < prior_low if pd.notna(last["prior_low"]) else False
-    add("SD Liquidity Sweep", "SELL" if broke_up and close < prior_high else "BUY" if broke_dn and close > prior_low else "WAIT", "Smart money liquidity sweep at key level")
-
-    # 8. SD Fair Value Imbalance Gap
+    add("SMC Inducement (IDM) Trap", "SELL" if broke_up and close < prior_high else "BUY" if broke_dn and close > prior_low else "WAIT", "Inducement sweep / liquidity trap detection")
+    
+    # 5. Multi Timeframe & Trend Alignment (4H/1H/15m)
+    add("Multi-Timeframe Trend Alignment", "BUY" if sma20 > sma50 and close > sma20 else "SELL" if sma20 < sma50 and close < sma20 else "WAIT", "Direction & behavior trend alignment filter")
+    
+    # 6. Two-Candle Price Action (Engulfing)
+    is_bull_engulf = close > float(prev["close"]) and close > float(last["open"]) and float(prev["close"]) < float(prev["open"])
+    is_bear_engulf = close < float(prev["close"]) and close < float(last["open"]) and float(prev["close"]) > float(prev["open"])
+    add("Two-Candle Price Action", "BUY" if is_bull_engulf else "SELL" if is_bear_engulf else "WAIT", "Candlestick momentum & engulfing confirmation")
+    
+    # 7. Fair Value Gap (FVG)
     bullish_fvg = float(prev2["high"]) < float(last["low"])
     bearish_fvg = float(prev2["low"]) > float(last["high"])
-    add("SD Imbalance FVG Zone", "BUY" if bullish_fvg else "SELL" if bearish_fvg else "WAIT", "Unmitigated institutional price imbalance gap")
-
+    add("Fair Value Gap (FVG)", "BUY" if bullish_fvg else "SELL" if bearish_fvg else "WAIT", "Unmitigated institutional price imbalance gap")
+    
+    # 8. Supply & Demand Zones (Momentum & Fibonacci 0.5/0.618)
+    fib_50 = prior_low + (prior_high - prior_low) * 0.5
+    is_3bull = (float(last["close"]) > float(last["open"])) and (float(prev["close"]) > float(prev["open"])) and (float(prev2["close"]) > float(prev2["open"]))
+    is_3bear = (float(last["close"]) < float(last["open"])) and (float(prev["close"]) < float(prev["open"])) and (float(prev2["close"]) < float(prev2["open"]))
+    add("Supply & Demand Zones", "BUY" if is_3bull or (close >= fib_50 and close > float(last["open"])) else "SELL" if is_3bear or (close <= fib_50 and close < float(last["open"])) else "WAIT", "Aggressive SD momentum and Fibonacci golden zone")
+    
     return df, pd.DataFrame(signals), atr
 
 def evaluate_and_close_trades(con, symbol, last_candle, pair_label=""):
@@ -587,7 +584,7 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     risk_cash = max(10.0, float(balance) * 0.015)
     qty = min(risk_cash / stop_distance, 100000.0)
     
-    note = ", ".join(signals.loc[signals["Signal"] == side, "Strategy"].tolist()) if signals is not None else "Manual SD Execution"
+    note = ", ".join(signals.loc[signals["Signal"] == side, "Strategy"].tolist()) if signals is not None else "Manual Execution"
     
     if mt5_live_enabled:
         success, msg = execute_mt5_live_trade(pair_label, side, 0.1, stop, target)
@@ -662,7 +659,7 @@ mt5_live_mode = get_setting("mt5_live", "0") == "1"
 analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["📊 Analyzer", "🧠 Strategy Library", "🧾 Demo & Live Journal", "⚙️ Setup & Limits"])
 
 with analyzer_tab:
-    st.subheader(f"{pair_label} — SD & Multi-Timeframe Suite {('(MT5 Direct Feed Active)' if mt5_live_mode else '(Demo Simulator Active)')}")
+    st.subheader(f"{pair_label} — Multi-Timeframe & SD Suite {('(MT5 Direct Feed Active)' if mt5_live_mode else '(Demo Simulator Active)')}")
     
     tf_tabs = st.tabs(["🕒 H1 (1 hour)", "⚡ M15 (15 minutes)", "📅 D1 (1 day)"])
     
@@ -762,20 +759,20 @@ with analyzer_tab:
                         return "color: #f1c40f; font-weight: bold;"
                     return ""
 
-                st.subheader(f"8 Supply & Demand Votes ({tf_name})")
+                st.subheader(f"8 Combined Strategy Votes ({tf_name})")
                 st.dataframe(votes.style.map(color_signals, subset=["Signal"]), use_container_width=True, hide_index=True)
 
 with library_tab:
-    st.subheader("Strategy Library (Price Lesson Hindi — SD & MTF Suite)")
+    st.subheader("Strategy Library (SMC, Price Action, Supply & Demand & MTF Suite)")
     st.dataframe(pd.DataFrame([
-        {"Strategy": "SD 3-Momentum Candles", "Purpose": "Aggressive 3-candle smart money institutional push"},
-        {"Strategy": "SD Consolidation Zone", "Purpose": "Tight range consolidation breakout & retest zone"},
-        {"Strategy": "SD Long Wicks Rejection", "Purpose": "Demand/Supply zone rejection wicks"},
-        {"Strategy": "SD Fibonacci Golden Zone", "Purpose": "0.5 and 0.618 golden retracement zone entry"},
-        {"Strategy": "MTF Trend Alignment", "Purpose": "4H Direction, 1H Behavior, 15m Entry alignment"},
-        {"Strategy": "SD Engulfing Confirmation", "Purpose": "Bullish/Bearish engulfing candle at SD zone"},
-        {"Strategy": "SD Liquidity Sweep", "Purpose": "Liquidity trap & sweep detection at swing high/low"},
-        {"Strategy": "SD Imbalance FVG Zone", "Purpose": "Unmitigated fair value imbalance gap"},
+        {"Strategy": "Support / Resistance", "Purpose": "Recent range structural levels"},
+        {"Strategy": "Fibonacci & Equilibrium (50%)", "Purpose": "Discount/Premium 50% midpoint entry"},
+        {"Strategy": "Breakout", "Purpose": "Structural range high/low break"},
+        {"Strategy": "SMC Inducement (IDM) Trap", "Purpose": "Smart Money liquidity sweep & trap detection"},
+        {"Strategy": "Multi-Timeframe Trend Alignment", "Purpose": "4H Direction, 1H Behavior, 15m Entry alignment"},
+        {"Strategy": "Two-Candle Price Action", "Purpose": "Bullish/Bearish engulfing confirmation"},
+        {"Strategy": "Fair Value Gap (FVG)", "Purpose": "Unmitigated institutional price imbalance gap"},
+        {"Strategy": "Supply & Demand Zones", "Purpose": "Aggressive SD momentum and Fibonacci golden zone"},
     ]), use_container_width=True, hide_index=True)
 
 with paper_tab:
@@ -865,14 +862,14 @@ with paper_tab:
         st.info("Abhi koi trade record nahi hai.")
     else:
         st.dataframe(display_trades, use_container_width=True, hide_index=True)
-        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man2_sd_trades.csv", mime="text/csv")
+        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man2_ultimate_trades.csv", mime="text/csv")
 
 with setup_tab:
     st.subheader("Setup & Instructions")
     st.markdown("""
-    - **BIG MAN2 Pro:** Replaced old strategies with Supply & Demand + Multi Timeframe Analysis suite.
-    - **Multi Timeframe Rules:** 4H Direction -> 1H Behavior -> 15m Entry alignment.
-    - **Timezone:** Timestamps are automatically converted to Indian Standard Time (IST).
+    - **BIG MAN2 Ultimate Pro:** Purani SMC aur Price Action strategies ke sath Supply & Demand aur Multi Timeframe Analysis (4H/1H/15m) ka fusion.
+    - **Timeframe Separation:** H1, M15, aur D1 ke liye alag alag charts aur execution panels.
+    - **Timezone:** Timestamps automatically Indian Standard Time (IST) me convert hote hain.
     """)
     if st.button("Clear cached market data"):
         st.cache_data.clear()
