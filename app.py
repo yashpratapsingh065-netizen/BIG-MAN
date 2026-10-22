@@ -10,8 +10,11 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-# BIG MAN2 Forex AI Pro — 10 Master Strategy Edition (Original + YouTube Channel s1-s6)
-# Paper-trading only. Institutional heuristic rule engine.
+# ==============================================================================
+# BIG MAN2 Forex AI Pro — 10 Master Strategy Edition (Fully Documented for Training)
+# Paper-trading only. Institutional heuristic rule engine based on 
+# Price Action & Smart Money Concepts (SMC) from Price Lesson Hindi channel.
+# ==============================================================================
 
 st.set_page_config(
     page_title="BIG MAN2 — Forex AI Pro (10 Master Strategies)",
@@ -53,7 +56,7 @@ div[data-testid="stMetric"] { background:#111827; border:1px solid #263244; padd
 
 st.markdown(
     '<div class="brand"><h1>🐂⚡ BIG MAN2 — Forex AI Pro (10 Master Strategies Edition)</h1>'
-    '<p>Original Heuristics + Price Lesson Hindi (s1-s6 SMC & Price Action) • Paper Trading</p></div>',
+    '<p>Detailed Strategy Heuristics • Price Action & SMC (s1-s6) • Paper Trading</p></div>',
     unsafe_allow_html=True,
 )
 
@@ -216,9 +219,11 @@ def fetch_candles(pair_label, tf_info):
 
 def strategy_signals(data):
     """
-    Evaluates all 10 Strategies: 
-    Original 8 (Support/Resistance, Fib/Equilibrium, Breakout, IDM Trap, Trend Alignment, 
-    Engulfing, FVG, Supply/Demand) + YouTube Channel s1 & s2 advanced momentum metrics.
+    ============================================================================
+    BIG MAN BOT TRAINING MODULE: 10 MASTER STRATEGIES EVALUATION ENGINE
+    ============================================================================
+    Har ek strategy ke rules aur logic ko yahan detail mein define kiya gaya hai
+    taki bot market ke current price action ko samajh kar intelligent vote de sake.
     """
     df = data.copy().sort_values("time").reset_index(drop=True)
     df["sma20"] = df["close"].rolling(20, min_periods=5).mean()
@@ -248,61 +253,79 @@ def strategy_signals(data):
     def add(name, vote, note):
         signals.append({"Strategy": name, "Signal": vote, "Reason": note})
 
-    # 1. Support / Resistance (Original)
+    # --------------------------------------------------------------------------
+    # 1. Support / Resistance (Structural S&R Zone Reaction)
+    # Detail: Detects whether price is near the upper boundary (Resistance) or lower boundary (Support).
+    # --------------------------------------------------------------------------
     add("1. Support / Resistance",
         "BUY" if close > prior_low + width * 0.65 else ("SELL" if close < prior_low + width * 0.35 else "WAIT"),
-        "Price position inside recent 20-candle range")
+        "Price position inside recent 20-candle S&R range")
 
-    # 2. Fibonacci & Equilibrium 50% (Original)
+    # --------------------------------------------------------------------------
+    # 2. Fibonacci & Equilibrium (50% Midpoint)
+    # Detail: Evaluates discount vs. premium zones. Buying in discount (below equilibrium) 
+    # and selling in premium (above equilibrium) based on the 0.382 - 0.618 fib sweet spot.
+    # --------------------------------------------------------------------------
     fib_low = prior_low + width * 0.382
     fib_high = prior_low + width * 0.618
     equilibrium = (prior_high + prior_low) / 2
     add("2. Fibonacci & Equilibrium (50%)",
         "BUY" if close > equilibrium and close >= fib_low else ("SELL" if close < equilibrium and close <= fib_high else "WAIT"),
-        f"Equilibrium midpoint {equilibrium:.5f}")
+        f"Equilibrium midpoint {equilibrium:.5f} discount/premium check")
 
-    # 3. Breakout Strategy (Original)
+    # --------------------------------------------------------------------------
+    # 3. Breakout Strategy
+    # Detail: Triggers when price cleanly closes above the previous 20-candle high or below the low.
+    # --------------------------------------------------------------------------
     add("3. Breakout Strategy",
         "BUY" if close > prior_high else ("SELL" if close < prior_low else "WAIT"),
-        "Close breaking previous 20-candle high/low range")
+        "Close breaking previous 20-candle high/low range boundary")
 
-    # 4. SMC Inducement (IDM) Trap (Original / s5)
+    # 4. SMC Inducement (IDM) Trap (s5)
+    # Detail: Detects liquidity sweeps where price breaks a prior high/low temporarily 
+    # but reverses back inside, trapping retail breakout traders.
     prev_close = float(prev["close"])
     broke_up = prev_close > prior_high
     broke_dn = prev_close < prior_low
-    add("4. SMC Inducement (IDM) Trap",
+    add("4. SMC Inducement (IDM) Trap (s5)",
         "SELL" if broke_up and close < prior_high else ("BUY" if broke_dn and close > prior_low else "WAIT"),
-        "Possible liquidity sweep / trap heuristic")
+        "Possible liquidity sweep / inducement trap heuristic")
 
-    # 5. Trend Alignment / Moving Average Filter (Original)
+    # 5. Trend Alignment (SMA20 / SMA50 Filter)
+    # Detail: Ensures trades are taken only in the direction of the moving average trend.
     add("5. Trend Alignment (SMA20/50)",
         "BUY" if sma20 > sma50 and close > sma20 else ("SELL" if sma20 < sma50 and close < sma20 else "WAIT"),
-        "SMA20/SMA50 institutional trend filter")
+        "SMA20/SMA50 institutional trend alignment filter")
 
-    # 6. Two-Candle Price Action / Engulfing (Original / s3)
+    # 6. Two-Candle Engulfing Price Action (s3)
+    # Detail: Looks for strong bullish or bearish engulfing candle formations after indecision.
     is_bull_engulf = close > prev_close and close > open_p and prev_close < float(prev["open"])
     is_bear_engulf = close < prev_close and close < open_p and prev_close > float(prev["open"])
     add("6. Two-Candle Engulfing (s3)",
         "BUY" if is_bull_engulf else ("SELL" if is_bear_engulf else "WAIT"),
-        "Engulfing-style candle confirmation")
+        "Engulfing-style confirmation candle formation")
 
-    # 7. Fair Value Gap - FVG (Original / s5-fvg)
+    # 7. Fair Value Gap - FVG (s5-fvg)
+    # Detail: Identifies 3-candle institutional imbalance gaps where rapid momentum left an unfilled zone.
     bullish_fvg = float(prev2["high"]) < float(last["low"])
     bearish_fvg = float(prev2["low"]) > float(last["high"])
-    add("7. Fair Value Gap (FVG)",
+    add("7. Fair Value Gap (FVG) (s5-fvg)",
         "BUY" if bullish_fvg else ("SELL" if bearish_fvg else "WAIT"),
-        "Three-candle imbalance gap heuristic")
+        "Three-candle institutional imbalance gap heuristic")
 
-    # 8. Supply & Demand Zones (Original / s6)
-    add("8. Supply & Demand Zones",
+    # 8. Supply & Demand Zones (s6)
+    # Detail: Marks aggressive buying/selling origin zones at extreme range boundaries.
+    add("8. Supply & Demand Zones (s6)",
         "BUY" if close < prior_low + width * 0.25 else ("SELL" if close > prior_low + width * 0.75 else "WAIT"),
-        "Range-extreme supply & demand zone heuristic")
+        "Range-extreme supply & demand zone reaction test")
 
     # 9. Multi-Timeframe Trend Alignment (YouTube s1)
+    # Detail: Enforces alignment between broader structural bias and immediate behavior.
     s1_vote = "BUY" if sma20 > sma50 and close > sma20 else ("SELL" if sma20 < sma50 and close < sma20 else "WAIT")
     add("9. Multi-Timeframe Trend (s1)", s1_vote, "Higher & behavior timeframe structural alignment")
 
     # 10. Impulse vs. Corrective Shift (YouTube s2)
+    # Detail: Compares candle body expansion to spot momentum shifts and trend reversals.
     recent_body = abs(close - open_p)
     prev_body = abs(float(prev["close"]) - float(prev["open"]))
     s2_vote = "BUY" if recent_body > prev_body and close > open_p else ("SELL" if recent_body > prev_body and close < open_p else "WAIT")
@@ -421,7 +444,7 @@ with st.sidebar:
     if auto_toggle != auto_setting:
         set_setting("auto_paper", "1" if auto_toggle else "0")
         st.rerun()
-    st.caption("All 10 Original & YouTube SMC strategies active.")
+    st.caption("All 10 Original & YouTube SMC strategies active with full descriptions.")
     if st.button("🔄 Refresh market data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -492,20 +515,32 @@ with analyzer_tab:
                     (st.success if ok else st.error)(msg)
 
 with library_tab:
-    st.subheader("Complete 10 Master Strategies Library")
+    st.subheader("Complete 10 Master Strategies Library & Detailed Descriptions")
+    st.markdown("""
+    Here is the complete training inventory of all **10 Master Strategies** integrated into BIG MAN2 Bot:
+    1. **Support / Resistance**: Evaluates structural zone boundaries and recent price positions.
+    2. **Fibonacci & Equilibrium (50%)**: Determines discount vs premium zones around the 50% midpoint.
+    3. **Breakout Strategy**: Captures momentum breaks past 20-candle high/low extremes.
+    4. **SMC Inducement (IDM) Trap (s5)**: Identifies liquidity sweeps and retail breakout traps.
+    5. **Trend Alignment (SMA20/50)**: Confirms institutional trend direction using moving averages.
+    6. **Two-Candle Engulfing (s3)**: Spots strong engulfing candles after indecision.
+    7. **Fair Value Gap (FVG) (s5-fvg)**: Detects 3-candle imbalance zones and rapid momentum gaps.
+    8. **Supply & Demand Zones (s6)**: Locates aggressive origin zones and wick rejection areas.
+    9. **Multi-Timeframe Trend (s1)**: Aligns higher timeframe structure with immediate behavior.
+    10. **Impulse vs Corrective Shift (s2)**: Measures candle body speed to spot momentum reversals.
+    """)
     st.dataframe(pd.DataFrame([
-        {"Strategy #1": "Support / Resistance", "Purpose": "Recent range structural levels"},
-        {"Strategy #2": "Fibonacci & Equilibrium (50%)", "Purpose": "Range midpoint and discount/premium heuristic"},
-        {"Strategy #3": "Breakout Strategy", "Purpose": "Previous range high/low break"},
-        {"Strategy #4": "SMC Inducement (IDM) Trap", "Purpose": "Possible liquidity sweep heuristic"},
-        {"Strategy #5": "Trend Alignment (SMA20/50)", "Purpose": "SMA20/SMA50 trend filter"},
-        {"Strategy #6": "Two-Candle Engulfing (s3)", "Purpose": "Engulfing-style candle confirmation"},
-        {"Strategy #7": "Fair Value Gap (FVG)", "Purpose": "Three-candle gap imbalance heuristic"},
-        {"Strategy #8": "Supply & Demand Zones (s6)", "Purpose": "Range-extreme supply & demand zones"},
-        {"Strategy #9": "Multi-Timeframe Trend (s1)", "Purpose": "Higher & behavior timeframe alignment"},
-        {"Strategy #10": "Impulse vs Corrective Shift (s2)", "Purpose": "Momentum expansion vs pullback size check"}
+        {"Strategy #1": "Support / Resistance", "Detail": "Recent range structural levels"},
+        {"Strategy #2": "Fibonacci & Equilibrium (50%)", "Detail": "Range midpoint and discount/premium heuristic"},
+        {"Strategy #3": "Breakout Strategy", "Detail": "Previous range high/low break"},
+        {"Strategy #4": "SMC Inducement (IDM) Trap", "Detail": "Possible liquidity sweep heuristic"},
+        {"Strategy #5": "Trend Alignment (SMA20/50)", "Detail": "SMA20/SMA50 trend filter"},
+        {"Strategy #6": "Two-Candle Engulfing (s3)", "Detail": "Engulfing-style candle confirmation"},
+        {"Strategy #7": "Fair Value Gap (FVG)", "Detail": "Three-candle gap imbalance heuristic"},
+        {"Strategy #8": "Supply & Demand Zones (s6)", "Detail": "Range-extreme supply & demand zones"},
+        {"Strategy #9": "Multi-Timeframe Trend (s1)", "Detail": "Higher & behavior timeframe alignment"},
+        {"Strategy #10": "Impulse vs Corrective Shift (s2)", "Detail": "Momentum expansion vs pullback size check"}
     ]), use_container_width=True, hide_index=True)
-    st.caption("Combines the original project's foundational strategies with the advanced YouTube Price Action & SMC episode concepts.")
 
 with journal_tab:
     st.subheader("Active Open Trades — Manual Management")
