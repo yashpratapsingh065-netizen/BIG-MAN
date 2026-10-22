@@ -124,10 +124,12 @@ PAIRS = {
     "GBP/USD": "GBPUSD=X",
     "USD/JPY": "JPY=X",
 }
+
+# Dedicated Timeframe Configurations
 TIMEFRAMES = {
-    "H1 (1 hour)": ("60m", "1mo"),
-    "M15 (15 minutes)": ("15m", "5d"),
-    "D1 (1 day)": ("1d", "6mo"),
+    "H1 (1 hour)": {"interval": "60m", "period": "1mo", "code": "60m"},
+    "M15 (15 minutes)": {"interval": "15m", "period": "5d", "code": "15m"},
+    "D1 (1 day)": {"interval": "1d", "period": "6mo", "code": "1d"},
 }
 
 def utc_now_str():
@@ -545,10 +547,11 @@ def start_background_monitor():
 init_db()
 start_background_monitor()
 
+# --- SIDEBAR CONTROLS ---
 with st.sidebar:
     st.header("Settings & MT5 Link")
     pair_label = st.selectbox("Currency pair", list(PAIRS.keys()))
-    timeframe_label = st.selectbox("Timeframe", list(TIMEFRAMES.keys()))
+    
     signal_mode = st.selectbox(
         "Signal mode",
         ["Safe Mode", "Fast Mode"],
@@ -557,8 +560,6 @@ with st.sidebar:
     )
     vote_threshold = 5 if signal_mode == "Safe Mode" else 3
     ticker = PAIRS[pair_label]
-    interval, period = TIMEFRAMES[timeframe_label]
-    timeframe_code = interval
     
     balance_value = float(get_setting("virtual_balance", "10000") or 10000)
     new_balance = st.number_input("Demo balance ($)", min_value=100.0, max_value=1_000_000.0, value=float(balance_value), step=100.0)
@@ -582,105 +583,113 @@ with st.sidebar:
 
 balance = float(get_setting("virtual_balance", "10000") or 10000)
 mt5_live_mode = get_setting("mt5_live", "0") == "1"
-data, fetch_error = fetch_candles(ticker, interval, period)
 
 analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["📊 Analyzer", "🧠 Strategy Library", "🧾 Demo & Live Journal", "⚙️ Setup & Limits"])
 
 with analyzer_tab:
-    st.subheader(f"{pair_label} · {timeframe_label} {('(MT5 Live Active)' if mt5_live_mode else '(Demo Simulator Active)')}")
+    st.subheader(f"{pair_label} — Multi-Timeframe Analysis & Execution {('(MT5 Live Active)' if mt5_live_mode else '(Demo Simulator Active)')}")
     
-    with db_connect() as con:
-        all_open_trades = con.execute("SELECT DISTINCT symbol FROM paper_trades WHERE status='OPEN'").fetchall()
-        for ot in all_open_trades:
-            sym = ot["symbol"]
-            sym_interval = timeframe_code if sym == ticker else "60m"
-            sym_period = period if sym == ticker else "1mo"
-            s_data, s_err = fetch_candles(sym, sym_interval, sym_period)
-            if not s_data.empty:
-                evaluate_and_close_trades(con, sym, s_data.iloc[-1])
-
-    if fetch_error or data.empty:
-        st.error(fetch_error or "Market data unavailable.")
-    elif len(data) < 3:
-        st.warning("Signal banane ke liye abhi candles kam hain.")
-    else:
-        analyzed, votes, atr = strategy_signals(data)
-        last = analyzed.iloc[-1]
-        buy_votes = int((votes["Signal"] == "BUY").sum())
-        sell_votes = int((votes["Signal"] == "SELL").sum())
-        signal = "BUY" if buy_votes >= vote_threshold else "SELL" if sell_votes >= vote_threshold else "WAIT"
-        candle_time = pd.Timestamp(last["time"]).isoformat()
-        pair_time_key = f"{ticker}|{timeframe_code}"
-        
-        try:
-            last_trade_candles = json.loads(get_setting("last_trade_candles", "{}"))
-            if not isinstance(last_trade_candles, dict):
-                last_trade_candles = {}
-        except (TypeError, json.JSONDecodeError):
-            last_trade_candles = {}
+    # Sub-tabs for strict Timeframe separation (H1, M15, D1)
+    tf_tabs = st.tabs(["🕒 H1 (1 hour)", "⚡ M15 (15 minutes)", "📅 D1 (1 day)"])
+    
+    for tf_idx, (tf_name, tf_info) in enumerate(TIMEFRAMES.items()):
+        with tf_tabs[tf_idx]:
+            interval = tf_info["interval"]
+            period = tf_info["period"]
+            timeframe_code = tf_info["code"]
             
-        with db_connect() as con:
-            closed_count = evaluate_and_close_trades(con, ticker, last)
-            if new_auto:
-                if signal in ("BUY", "SELL"):
-                    if last_trade_candles.get(pair_time_key) == candle_time:
-                        st.info("Is candle par trade pehle hi create ho chuka hai.")
-                    else:
-                        made, msg = create_auto_trade(con, ticker, timeframe_code, signal, last, atr, balance, votes, pair_label, mt5_live_mode)
-                        if made:
-                            last_trade_candles[pair_time_key] = candle_time
-                            con_set_setting(con, "last_trade_candles", json.dumps(last_trade_candles))
-                            st.success(msg)
-                        else:
-                            st.warning(f"Trade create nahi hua: {msg}")
-                else:
-                    st.caption("Signal WAIT hai.")
+            data, fetch_error = fetch_candles(ticker, interval, period)
+            
+            with db_connect() as con:
+                all_open_trades = con.execute("SELECT DISTINCT symbol FROM paper_trades WHERE status='OPEN'").fetchall()
+                for ot in all_open_trades:
+                    sym = ot["symbol"]
+                    s_data, s_err = fetch_candles(sym, interval, period)
+                    if not s_data.empty:
+                        evaluate_and_close_trades(con, sym, s_data.iloc[-1])
+
+            if fetch_error or data.empty:
+                st.error(fetch_error or f"Market data unavailable for {tf_name}.")
+            elif len(data) < 3:
+                st.warning(f"Signal banane ke liye {tf_name} par abhi candles kam hain.")
             else:
-                st.caption("Auto Trading OFF hai.")
-
-        # --- MANUAL EXECUTION PANEL ---
-        with st.expander("⚡ Manual Trade Execution Panel (Buy / Sell)", expanded=True):
-            mc1, mc2, mc3 = st.columns(3)
-            manual_side = mc1.selectbox("Select Direction", ["BUY", "SELL"], key="manual_side_select")
-            if mc3.button("🚀 Execute Manual Order", use_container_width=True, key="manual_exec_btn"):
-                with db_connect() as man_con:
-                    m_made, m_msg = create_auto_trade(man_con, ticker, timeframe_code, manual_side, last, atr, balance, None, pair_label, mt5_live_mode)
-                    if m_made:
-                        st.success(m_msg)
-                        st.rerun()
+                analyzed, votes, atr = strategy_signals(data)
+                last = analyzed.iloc[-1]
+                buy_votes = int((votes["Signal"] == "BUY").sum())
+                sell_votes = int((votes["Signal"] == "SELL").sum())
+                signal = "BUY" if buy_votes >= vote_threshold else "SELL" if sell_votes >= vote_threshold else "WAIT"
+                candle_time = pd.Timestamp(last["time"]).isoformat()
+                pair_time_key = f"{ticker}|{timeframe_code}"
+                
+                try:
+                    last_trade_candles = json.loads(get_setting("last_trade_candles", "{}"))
+                    if not isinstance(last_trade_candles, dict):
+                        last_trade_candles = {}
+                except (TypeError, json.JSONDecodeError):
+                    last_trade_candles = {}
+                    
+                with db_connect() as con:
+                    closed_count = evaluate_and_close_trades(con, ticker, last)
+                    if new_auto:
+                        if signal in ("BUY", "SELL"):
+                            if last_trade_candles.get(pair_time_key) == candle_time:
+                                st.info(f"[{tf_name}] Is candle par trade pehle hi create ho chuka hai.")
+                            else:
+                                made, msg = create_auto_trade(con, ticker, timeframe_code, signal, last, atr, balance, votes, pair_label, mt5_live_mode)
+                                if made:
+                                    last_trade_candles[pair_time_key] = candle_time
+                                    con_set_setting(con, "last_trade_candles", json.dumps(last_trade_candles))
+                                    st.success(msg)
+                                else:
+                                    st.warning(f"Trade create nahi hua: {msg}")
+                        else:
+                            st.caption(f"[{tf_name}] Signal WAIT hai.")
                     else:
-                        st.error(m_msg)
+                        st.caption(f"[{tf_name}] Auto Trading OFF hai.")
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Combined signal", signal)
-        c2.metric("BUY votes", f"{buy_votes}/8")
-        c3.metric("SELL votes", f"{sell_votes}/8")
-        c4.metric("Latest close", f"{float(last['close']):.5f}")
+                # --- ISOLATED MANUAL EXECUTION PANEL PER TIMEFRAME ---
+                with st.expander(f"⚡ Manual Trade Execution Panel ({tf_name})", expanded=True):
+                    mc1, mc2, mc3 = st.columns(3)
+                    manual_side = mc1.selectbox("Select Direction", ["BUY", "SELL"], key=f"manual_side_{timeframe_code}")
+                    if mc3.button("🚀 Execute Manual Order", use_container_width=True, key=f"manual_btn_{timeframe_code}"):
+                        with db_connect() as man_con:
+                            m_made, m_msg = create_auto_trade(man_con, ticker, timeframe_code, manual_side, last, atr, balance, None, pair_label, mt5_live_mode)
+                            if m_made:
+                                st.success(m_msg)
+                                st.rerun()
+                            else:
+                                st.error(m_msg)
 
-        fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name="Candles")])
-        fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
-        fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma50"], name="SMA 50", mode="lines"))
-        fig.update_layout(
-            height=520, 
-            xaxis_rangeslider_visible=False, 
-            margin=dict(l=10, r=10, t=30, b=10),
-            paper_bgcolor="#0b0f19",
-            plot_bgcolor="#0b0f19",
-            font=dict(color="#f3f4f6")
-        )
-        st.plotly_chart(fig, use_container_width=True)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric(f"Signal ({tf_name})", signal)
+                c2.metric("BUY votes", f"{buy_votes}/8")
+                c3.metric("SELL votes", f"{sell_votes}/8")
+                c4.metric("Latest close", f"{float(last['close']):.5f}")
 
-        def color_signals(val):
-            if val == "BUY":
-                return "color: #2ecc71; font-weight: bold;"
-            elif val == "SELL":
-                return "color: #e74c3c; font-weight: bold;"
-            elif val == "WAIT":
-                return "color: #f1c40f; font-weight: bold;"
-            return ""
+                fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name=f"{pair_label} {tf_name}")])
+                fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
+                fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma50"], name="SMA 50", mode="lines"))
+                fig.update_layout(
+                    height=480, 
+                    xaxis_rangeslider_visible=False, 
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    paper_bgcolor="#0b0f19",
+                    plot_bgcolor="#0b0f19",
+                    font=dict(color="#f3f4f6")
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("8 Advanced SMC & Price Action Strategy Votes")
-        st.dataframe(votes.style.map(color_signals, subset=["Signal"]), use_container_width=True, hide_index=True)
+                def color_signals(val):
+                    if val == "BUY":
+                        return "color: #2ecc71; font-weight: bold;"
+                    elif val == "SELL":
+                        return "color: #e74c3c; font-weight: bold;"
+                    elif val == "WAIT":
+                        return "color: #f1c40f; font-weight: bold;"
+                    return ""
+
+                st.subheader(f"8 Advanced SMC & Price Action Votes ({tf_name})")
+                st.dataframe(votes.style.map(color_signals, subset=["Signal"]), use_container_width=True, hide_index=True)
 
 with library_tab:
     st.subheader("Strategy Library (Price Lesson Hindi — SMC & Price Action Suite)")
@@ -705,7 +714,7 @@ with paper_tab:
     else:
         for _, row in open_df.iterrows():
             col_a, col_b, col_c, col_d = st.columns([2, 2, 2, 2])
-            col_a.write(f"**ID #{row['id']}** | {row['symbol']} ({row['side']})")
+            col_a.write(f"**ID #{row['id']}** | {row['symbol']} [{row['timeframe']}] ({row['side']})")
             col_b.write(f"Entry: `{row['entry']}`")
             col_c.write(f"SL: `{row['stop']}` | TP: `{row['target']}`")
             if col_d.button(f"Close Trade #{row['id']}", key=f"manual_close_{row['id']}"):
@@ -727,6 +736,7 @@ with paper_tab:
         trades = pd.read_sql_query("""
             SELECT id AS 'Trade ID', 
                    symbol AS 'Currency Pair', 
+                   timeframe AS 'Timeframe',
                    side AS 'Side', 
                    entry AS 'Entry Price', 
                    created_at AS 'Entry Time (UTC)', 
@@ -749,7 +759,7 @@ with paper_tab:
         trades['Exit Time'] = trades['Exit Time (UTC)'].apply(convert_utc_to_ist)
         
         display_trades = trades.drop(columns=['Entry Time (UTC)', 'Exit Time (UTC)'])
-        cols = ['Trade ID', 'Currency Pair', 'Side', 'Entry Price', 'Entry Time', 'Stop Loss', 'Take Profit', 'Exit Price', 'Exit Time', 'Duration', 'Status', 'P/L ($)', 'Exit Reason', 'Strategy Note']
+        cols = ['Trade ID', 'Currency Pair', 'Timeframe', 'Side', 'Entry Price', 'Entry Time', 'Stop Loss', 'Take Profit', 'Exit Price', 'Exit Time', 'Duration', 'Status', 'P/L ($)', 'Exit Reason', 'Strategy Note']
         existing_cols = [c for c in cols if c in display_trades.columns]
         display_trades = display_trades[existing_cols]
 
@@ -786,7 +796,8 @@ with paper_tab:
 with setup_tab:
     st.subheader("Setup & Instructions")
     st.markdown("""
-    - **BIG MAN2 Pro:** Balanced time exit (15m 9s), manual buy/sell panel, and manual trade management enabled.
+    - **BIG MAN2 Pro:** Balanced time exit (15m 9s), manual buy/sell panel per timeframe, and manual trade management enabled.
+    - **Timeframe Separation:** View distinct H1, M15, and D1 charts and signals inside the **Analyzer** tab sub-tabs.
     - **MetaTrader 5 Live Integration:** Enable **Live Trading Mode (MT5)** in the sidebar anytime to route orders directly to your MT5 terminal.
     - **Timezone:** Timestamps are automatically converted to Indian Standard Time (IST).
     """)
