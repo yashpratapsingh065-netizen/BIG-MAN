@@ -1,168 +1,81 @@
 import json
 import sqlite3
 import time
-import threading
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 import pandas as pd
-import streamlit as st
 import plotly.graph_objects as go
+import requests
+import streamlit as st
 import yfinance as yf
 
-# Try importing MetaTrader5
-try:
-    import MetaTrader5 as mt5
-    MT5_AVAILABLE = True
-except ImportError:
-    MT5_AVAILABLE = False
+# ==============================================================================
+# BIG MAN2 Forex AI Pro — 10 Master Strategy Edition (Fully Documented for Training)
+# Paper-trading only. Institutional heuristic rule engine based on 
+# Price Action & Smart Money Concepts (SMC) from Price Lesson Hindi channel.
+# ==============================================================================
+
+st.set_page_config(
+    page_title="BIG MAN2 — Forex AI Pro (10 Master Strategies)",
+    page_icon="📈",
+    layout="wide",
+)
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
 try:
     DATA_DIR.mkdir(exist_ok=True)
-    _probe = DATA_DIR / ".write_test"
-    _probe.write_text("ok", encoding="utf-8")
-    _probe.unlink(missing_ok=True)
+    probe = DATA_DIR / ".write_test"
+    probe.write_text("ok", encoding="utf-8")
+    probe.unlink(missing_ok=True)
     DB_PATH = DATA_DIR / "big_man2.db"
 except OSError:
     DB_PATH = Path("/tmp") / "big_man2.db"
 
-st.set_page_config(page_title="BIG MAN2 — Ultimate Forex AI Pro (SMC, SD & MTF)", page_icon="📈", layout="wide")
+PAIRS = {
+    "EUR/USD": {"yahoo": "EURUSD=X", "twelve": "EUR/USD"},
+    "GBP/USD": {"yahoo": "GBPUSD=X", "twelve": "GBP/USD"},
+    "USD/JPY": {"yahoo": "JPY=X", "twelve": "USD/JPY"},
+}
+TIMEFRAMES = {
+    "H1 (1 hour)": {"twelve": "1h", "yahoo": "60m", "period": "1mo", "code": "H1"},
+    "M15 (15 minutes)": {"twelve": "15min", "yahoo": "15m", "period": "5d", "code": "M15"},
+    "D1 (1 day)": {"twelve": "1day", "yahoo": "1d", "period": "6mo", "code": "D1"},
+}
 
-# ==========================================
-# EXPERT UI: PREMIUM DARK MODE & BRANDING CSS
-# ==========================================
 st.markdown("""
 <style>
-    .stApp {
-        background-color: #0b0f19;
-        color: #f3f4f6;
-    }
-    .brand-header {
-        display: flex;
-        align-items: center;
-        gap: 15px;
-        padding: 15px 0;
-        border-bottom: 1px solid #1f2937;
-        margin-bottom: 25px;
-    }
-    .brand-logo {
-        font-size: 2.4rem;
-        background: linear-gradient(135deg, #3b82f6 0%, #10b981 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background-color: #111827;
-        padding: 8px 14px;
-        border-radius: 14px;
-        border: 1px solid #374151;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    }
-    .brand-title {
-        font-size: 1.9rem;
-        font-weight: 800;
-        color: #ffffff;
-        letter-spacing: 0.5px;
-        margin: 0;
-    }
-    .brand-subtitle {
-        color: #9ca3af;
-        font-size: 0.9rem;
-        margin: 0;
-    }
-    div[data-testid="stMetric"] {
-        background: linear-gradient(145deg, #111827 0%, #0f172a 100%);
-        border: 1px solid #1e293b;
-        padding: 16px;
-        border-radius: 14px;
-        box-shadow: 0 4px 15px -3px rgba(0, 0, 0, 0.5);
-    }
-    div[data-testid="stMetric"] label {
-        color: #94a3b8 !important;
-        font-weight: 600;
-        font-size: 0.9rem !important;
-    }
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-        color: #f8fafc !important;
-        font-weight: 800;
-        font-size: 1.5rem !important;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background-color: #111827;
-        padding: 6px;
-        border-radius: 12px;
-        border: 1px solid #1f2937;
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 8px;
-        color: #9ca3af;
-        font-weight: 600;
-    }
-    .stTabs [aria-selected="true"] {
-        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
-        color: white !important;
-    }
+.stApp { background:#0b0f19; color:#f3f4f6; }
+.brand { padding:14px 0 20px; border-bottom:1px solid #263244; margin-bottom:18px; }
+.brand h1 { color:#fff; font-size:1.8rem; margin:0; }
+.brand p { color:#9ca3af; margin:4px 0 0; }
+div[data-testid="stMetric"] { background:#111827; border:1px solid #263244; padding:12px; border-radius:12px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""
-<div class="brand-header">
-    <div class="brand-logo">🐂⚡</div>
-    <div>
-        <div class="brand-title">BIG MAN2 — Ultimate Forex AI Pro (SMC, SD & MTF)</div>
-        <div class="brand-subtitle">Supply & Demand + Multi Timeframe Analysis + SMC Suite + MT5 Live Integration</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-PAIRS = {
-    "EUR/USD": "EURUSD=X",
-    "GBP/USD": "GBPUSD=X",
-    "USD/JPY": "JPY=X",
-}
-
-TIMEFRAMES = {
-    "H1 (1 hour)": {"interval": "60m", "period": "1mo", "code": "60m"},
-    "M15 (15 minutes)": {"interval": "15m", "period": "5d", "code": "15m"},
-    "D1 (1 day)": {"interval": "1d", "period": "6mo", "code": "1d"},
-}
+st.markdown(
+    '<div class="brand"><h1>🐂⚡ BIG MAN2 — Forex AI Pro (10 Master Strategies Edition)</h1>'
+    '<p>Detailed Strategy Heuristics • Price Action & SMC (s1-s6) • Paper Trading</p></div>',
+    unsafe_allow_html=True,
+)
 
 def utc_now_str():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-def convert_utc_to_ist(utc_str):
-    if not utc_str or pd.isna(utc_str):
+def convert_utc_to_ist(value):
+    if not value or pd.isna(value):
         return ""
     try:
-        dt = pd.to_datetime(utc_str)
-        if dt.tzinfo is None:
-            dt = dt.tz_localize("UTC")
-        else:
-            dt = dt.tz_convert("UTC")
-        ist_zone = timezone(timedelta(hours=5, minutes=30))
-        ist_dt = dt.tz_convert(ist_zone)
-        return ist_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+        dt = pd.to_datetime(value, utc=True)
+        return dt.tz_convert("Asia/Kolkata").strftime("%Y-%m-%d %H:%M:%S IST")
     except Exception:
-        return str(utc_str)
+        return str(value)
 
 def db_connect():
-    for attempt in range(5):
-        try:
-            con = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
-            con.row_factory = sqlite3.Row
-            try:
-                con.execute("PRAGMA journal_mode=WAL;")
-            except Exception:
-                pass
-            return con
-        except sqlite3.OperationalError:
-            if attempt == 4:
-                raise
-            time.sleep(0.5)
+    con = sqlite3.connect(DB_PATH, timeout=20, check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    return con
 
 def init_db():
     with db_connect() as con:
@@ -182,232 +95,137 @@ def init_db():
             duration TEXT,
             pnl REAL,
             exit_reason TEXT,
-            strategy_note TEXT,
-            balance_updated INTEGER DEFAULT 0
+            strategy_note TEXT
         )""")
         con.execute("""CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
+            key TEXT PRIMARY KEY, value TEXT NOT NULL
         )""")
-        defaults = {
-            "virtual_balance": "10000",
-            "auto_paper": "0",
-            "mt5_live": "0",
-            "last_processed_candles": "{}",
-            "last_trade_candles": "{}",
-        }
+        defaults = {"virtual_balance": "10000", "auto_paper": "0"}
         for key, value in defaults.items():
-            existing = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
-            if not existing:
-                con.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, value))
+            con.execute(
+                "INSERT OR IGNORE INTO app_settings(key,value) VALUES(?,?)",
+                (key, value),
+            )
 
 def get_setting(key, default=""):
     try:
         with db_connect() as con:
             row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
-        return row[0] if row else default
+        return row["value"] if row else default
     except Exception:
         return default
 
 def set_setting(key, value):
+    with db_connect() as con:
+        con.execute(
+            "INSERT INTO app_settings(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)),
+        )
+
+def fetch_twelve_data(pair_label, interval, outputsize=500):
     try:
-        with db_connect() as con:
-            existing = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
-            if existing:
-                con.execute("UPDATE app_settings SET value=? WHERE key=?", (str(value), key))
-            else:
-                con.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, str(value)))
-    except Exception as exc:
-        st.warning(f"Setting save nahi ho saki: {exc}")
+        api_key = st.secrets.get("TWELVE_DATA_API_KEY", "")
+    except Exception:
+        api_key = ""
+    if not api_key or api_key == "YOUR_NEW_API_KEY":
+        return pd.DataFrame(), "Twelve Data API key missing in Streamlit Secrets."
 
-def con_set_setting(con, key, value):
-    existing = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
-    if existing:
-        con.execute("UPDATE app_settings SET value=? WHERE key=?", (str(value), key))
-    else:
-        con.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, str(value)))
-
-def get_mt5_timeframe(tf_code):
-    if not MT5_AVAILABLE:
-        return None
-    tf_map = {
-        "60m": mt5.TIMEFRAME_H1,
-        "15m": mt5.TIMEFRAME_M15,
-        "1d": mt5.TIMEFRAME_D1
+    params = {
+        "symbol": PAIRS[pair_label]["twelve"],
+        "interval": interval,
+        "outputsize": min(int(outputsize), 5000),
+        "apikey": api_key,
+        "format": "JSON",
+        "timezone": "UTC",
     }
-    return tf_map.get(tf_code, mt5.TIMEFRAME_M15)
+    try:
+        response = requests.get(
+            "https://api.twelvedata.com/time_series",
+            params=params,
+            timeout=20,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if "values" not in result:
+            return pd.DataFrame(), str(result.get("message", result.get("code", "No data returned")))
+        df = pd.DataFrame(result["values"])
+        required = ["datetime", "open", "high", "low", "close"]
+        if not all(c in df.columns for c in required):
+            return pd.DataFrame(), "Twelve Data returned incomplete candle data."
+        df["time"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
+        for col in ["open", "high", "low", "close"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce") if "volume" in df else 0
+        df = df[["time", "open", "high", "low", "close", "volume"]]
+        df = df.dropna(subset=["time", "open", "high", "low", "close"])
+        df = df.sort_values("time").tail(outputsize).reset_index(drop=True)
+        if df.empty:
+            return pd.DataFrame(), "No valid candles returned by Twelve Data."
+        return df, None
+    except requests.RequestException as exc:
+        return pd.DataFrame(), f"Twelve Data network error: {type(exc).__name__}"
+    except Exception as exc:
+        return pd.DataFrame(), f"Twelve Data error: {type(exc).__name__}"
 
-def fetch_candles(ticker, interval, period, symbol_label=""):
-    mt5_live = get_setting("mt5_live", "0") == "1"
-    if mt5_live and MT5_AVAILABLE:
-        try:
-            if mt5.initialize():
-                raw_symbol = symbol_label.replace("/", "") if symbol_label else ticker.replace("=X", "")
-                mt5_symbol = raw_symbol
-                symbol_info = mt5.symbol_info(mt5_symbol)
-                if symbol_info is None:
-                    mt5_symbol = raw_symbol + ".m"
-                    symbol_info = mt5.symbol_info(mt5_symbol)
-                
-                if symbol_info is not None:
-                    if not symbol_info.visible:
-                        mt5.symbol_select(mt5_symbol, True)
-                    
-                    mt5_tf = get_mt5_timeframe(interval)
-                    rates = mt5.copy_rates_from_pos(mt5_symbol, mt5_tf, 0, 300)
-                    if rates is not None and len(rates) > 0:
-                        df = pd.DataFrame(rates)
-                        df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
-                        df = df.rename(columns={'tick_volume': 'volume'})
-                        df = df[['time', 'open', 'high', 'low', 'close', 'volume']]
-                        mt5.shutdown()
-                        return df, None
-                mt5.shutdown()
-        except Exception:
-            if MT5_AVAILABLE:
-                mt5.shutdown()
-
-    # Fallback to web data feeds
+def fetch_yahoo_data(pair_label, yahoo_interval, period):
     try:
         raw = yf.download(
-            ticker,
-            interval=interval,
+            PAIRS[pair_label]["yahoo"],
+            interval=yahoo_interval,
             period=period,
             auto_adjust=False,
             progress=False,
             threads=False,
         )
         if raw is None or raw.empty:
-            return pd.DataFrame(), f"Data stream unavailable for {ticker}."
+            return pd.DataFrame(), "Yahoo Finance returned no data."
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
         raw.columns = [str(c).strip() for c in raw.columns]
-        required = ["Open", "High", "Low", "Close"]
-        missing = [col for col in required if col not in raw.columns]
-        if missing:
-            return pd.DataFrame(), f"Missing columns: {', '.join(missing)}"
-        data = raw.reset_index()
-        time_col = "Datetime" if "Datetime" in data.columns else "Date"
-        if time_col not in data.columns:
-            time_col = data.columns[0]
-        data = data.rename(columns={time_col: "time", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
-        data["time"] = pd.to_datetime(data["time"], errors="coerce", utc=True)
+        raw = raw.reset_index()
+        time_col = "Datetime" if "Datetime" in raw.columns else "Date"
+        if time_col not in raw.columns:
+            time_col = raw.columns[0]
+        raw = raw.rename(columns={
+            time_col: "time", "Open": "open", "High": "high",
+            "Low": "low", "Close": "close", "Volume": "volume",
+        })
+        raw["time"] = pd.to_datetime(raw["time"], errors="coerce", utc=True)
         for col in ["open", "high", "low", "close"]:
-            data[col] = pd.to_numeric(data[col], errors="coerce")
-        data = data.dropna(subset=["time", "open", "high", "low", "close"]).sort_values("time").tail(500).reset_index(drop=True)
-        if data.empty:
-            return pd.DataFrame(), "No valid price records."
-        return data, None
+            raw[col] = pd.to_numeric(raw[col], errors="coerce")
+        if "volume" not in raw:
+            raw["volume"] = 0
+        raw["volume"] = pd.to_numeric(raw["volume"], errors="coerce").fillna(0)
+        raw = raw[["time", "open", "high", "low", "close", "volume"]]
+        raw = raw.dropna(subset=["time", "open", "high", "low", "close"])
+        raw = raw.sort_values("time").tail(500).reset_index(drop=True)
+        if raw.empty:
+            return pd.DataFrame(), "Yahoo Finance returned no valid candles."
+        return raw, None
     except Exception as exc:
-        return pd.DataFrame(), f"Market data fetch error: {type(exc).__name__}: {exc}"
+        return pd.DataFrame(), f"Yahoo Finance error: {type(exc).__name__}"
 
-def fetch_fresh_exit_candle(symbol, symbol_label=""):
-    mt5_live = get_setting("mt5_live", "0") == "1"
-    if mt5_live and MT5_AVAILABLE:
-        try:
-            if mt5.initialize():
-                raw_symbol = symbol_label.replace("/", "") if symbol_label else symbol.replace("=X", "")
-                mt5_symbol = raw_symbol
-                symbol_info = mt5.symbol_info(mt5_symbol)
-                if symbol_info is None:
-                    mt5_symbol = raw_symbol + ".m"
-                    symbol_info = mt5.symbol_info(mt5_symbol)
-                if symbol_info is not None:
-                    tick = mt5.symbol_info_tick(mt5_symbol)
-                    if tick is not None:
-                        mt5.shutdown()
-                        return {"close": tick.bid, "high": tick.ask, "low": tick.bid}, None
-                mt5.shutdown()
-        except Exception:
-            if MT5_AVAILABLE:
-                mt5.shutdown()
+def fetch_candles(pair_label, tf_info):
+    td_df, td_error = fetch_twelve_data(pair_label, tf_info["twelve"], 500)
+    if not td_df.empty:
+        return td_df, None, "Twelve Data"
+    yahoo_df, yahoo_error = fetch_yahoo_data(
+        pair_label, tf_info["yahoo"], tf_info["period"]
+    )
+    if not yahoo_df.empty:
+        return yahoo_df, None, "Yahoo Finance fallback"
+    return pd.DataFrame(), f"Twelve Data: {td_error} | Yahoo: {yahoo_error}", "Unavailable"
 
-    try:
-        raw = yf.download(symbol, interval="1m", period="1d", auto_adjust=False, progress=False, threads=False)
-        if raw is None or raw.empty:
-            raw = yf.download(symbol, interval="15m", period="5d", auto_adjust=False, progress=False, threads=False)
-        if raw is None or raw.empty:
-            return None, "Fresh market data unavailable"
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
-        raw.columns = [str(c).strip() for c in raw.columns]
-        if not {"Open", "High", "Low", "Close"}.issubset(raw.columns):
-            return None, "Missing price columns"
-        data = raw.reset_index()
-        time_col = "Datetime" if "Datetime" in data.columns else "Date"
-        if time_col not in data.columns:
-            time_col = data.columns[0]
-        data = data.rename(columns={time_col: "time", "Close": "close", "High": "high", "Low": "low", "Open": "open"})
-        data["time"] = pd.to_datetime(data["time"], errors="coerce", utc=True)
-        data = data.dropna(subset=["time", "close"]).sort_values("time")
-        if data.empty:
-            return None, "No valid price records"
-        return data.iloc[-1], None
-    except Exception as exc:
-        return None, str(exc)
-
-def execute_mt5_live_trade(symbol_label, side, volume, stop_loss, take_profit):
-    if not MT5_AVAILABLE:
-        return False, "MetaTrader5 library is not installed."
-    try:
-        if not mt5.initialize():
-            return False, f"MT5 initialization failed: {mt5.last_error()}"
-        
-        mt5_symbol = symbol_label.replace("/", "")
-        symbol_info = mt5.symbol_info(mt5_symbol)
-        if symbol_info is None:
-            mt5_symbol = symbol_label.replace("/", "") + ".m"
-            symbol_info = mt5.symbol_info(mt5_symbol)
-            if symbol_info is None:
-                mt5.shutdown()
-                return False, f"Symbol {symbol_label} MT5 terminal par nahi mila."
-                
-        if not symbol_info.visible:
-            if not mt5.symbol_select(mt5_symbol, True):
-                mt5.shutdown()
-                return False, f"Failed to select symbol {mt5_symbol} in MT5."
-                
-        tick = mt5.symbol_info_tick(mt5_symbol)
-        if tick is None:
-            mt5.shutdown()
-            return False, f"Failed to get tick for {mt5_symbol}"
-            
-        price = tick.ask if side == "BUY" else tick.bid
-        order_type = mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL
-        
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": mt5_symbol,
-            "volume": float(volume),
-            "type": order_type,
-            "price": price,
-            "sl": float(stop_loss),
-            "tp": float(take_profit),
-            "deviation": 20,
-            "magic": 234000,
-            "comment": "BIG MAN2 Ultimate Pro",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_FOK,
-        }
-        
-        result = mt5.order_send(request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            err_code = result.retcode
-            mt5.shutdown()
-            return False, f"MT5 Order failed, retcode={err_code}"
-            
-        mt5.shutdown()
-        return True, f"MT5 Live Order Executed! Ticket: {result.order}"
-    except Exception as e:
-        if MT5_AVAILABLE:
-            mt5.shutdown()
-        return False, f"MT5 Execution Error: {str(e)}"
-
-# =========================================================
-# UNIFIED STRATEGY SUITE (SMC + PRICE ACTION + SD + MTF)
-# =========================================================
 def strategy_signals(data):
-    df = data.copy()
+    """
+    ============================================================================
+    BIG MAN BOT TRAINING MODULE: 10 MASTER STRATEGIES EVALUATION ENGINE
+    ============================================================================
+    Har ek strategy ke rules aur logic ko yahan detail mein define kiya gaya hai
+    taki bot market ke current price action ko samajh kar intelligent vote de sake.
+    """
+    df = data.copy().sort_values("time").reset_index(drop=True)
     df["sma20"] = df["close"].rolling(20, min_periods=5).mean()
     df["sma50"] = df["close"].rolling(50, min_periods=10).mean()
     df["prior_high"] = df["high"].rolling(20, min_periods=5).max().shift(1)
@@ -420,455 +238,370 @@ def strategy_signals(data):
     prev2 = df.iloc[-3] if len(df) > 2 else prev
     
     close = float(last["close"])
+    open_p = float(last["open"])
     atr = float(last["atr14"]) if pd.notna(last["atr14"]) else close * 0.001
     atr = max(atr, close * 0.0001)
+    
     sma20 = float(last["sma20"]) if pd.notna(last["sma20"]) else close
     sma50 = float(last["sma50"]) if pd.notna(last["sma50"]) else close
     prior_high = float(last["prior_high"]) if pd.notna(last["prior_high"]) else float(df["high"].iloc[:-1].max())
     prior_low = float(last["prior_low"]) if pd.notna(last["prior_low"]) else float(df["low"].iloc[:-1].min())
-
+    width = max(prior_high - prior_low, close * 0.00001)
+    
     signals = []
+
     def add(name, vote, note):
         signals.append({"Strategy": name, "Signal": vote, "Reason": note})
 
-    add("Support / Resistance", "BUY" if close > prior_low + (prior_high-prior_low)*0.65 else "SELL" if close < prior_low + (prior_high-prior_low)*0.35 else "WAIT", "Price position inside recent range")
-    
-    fib_low = prior_low + (prior_high-prior_low)*0.382
-    fib_high = prior_low + (prior_high-prior_low)*0.618
+    # --------------------------------------------------------------------------
+    # 1. Support / Resistance (Structural S&R Zone Reaction)
+    # Detail: Detects whether price is near the upper boundary (Resistance) or lower boundary (Support).
+    # --------------------------------------------------------------------------
+    add("1. Support / Resistance",
+        "BUY" if close > prior_low + width * 0.65 else ("SELL" if close < prior_low + width * 0.35 else "WAIT"),
+        "Price position inside recent 20-candle S&R range")
+
+    # --------------------------------------------------------------------------
+    # 2. Fibonacci & Equilibrium (50% Midpoint)
+    # Detail: Evaluates discount vs. premium zones. Buying in discount (below equilibrium) 
+    # and selling in premium (above equilibrium) based on the 0.382 - 0.618 fib sweet spot.
+    # --------------------------------------------------------------------------
+    fib_low = prior_low + width * 0.382
+    fib_high = prior_low + width * 0.618
     equilibrium = (prior_high + prior_low) / 2
-    add("Fibonacci & Equilibrium (50%)", "BUY" if close > equilibrium and close >= fib_low else "SELL" if close < equilibrium and close <= fib_high else "WAIT", f"Equilibrium midpoint {equilibrium:.5f}")
-    
-    add("Breakout", "BUY" if close > prior_high else "SELL" if close < prior_low else "WAIT", "Close compared with previous range breakout")
-    
-    broke_up = float(prev["close"]) > prior_high if pd.notna(last["prior_high"]) else False
-    broke_dn = float(prev["close"]) < prior_low if pd.notna(last["prior_low"]) else False
-    add("SMC Inducement (IDM) Trap", "SELL" if broke_up and close < prior_high else "BUY" if broke_dn and close > prior_low else "WAIT", "Inducement sweep / liquidity trap detection")
-    
-    add("Multi-Timeframe Trend Alignment", "BUY" if sma20 > sma50 and close > sma20 else "SELL" if sma20 < sma50 and close < sma20 else "WAIT", "Direction & behavior trend alignment filter")
-    
-    is_bull_engulf = close > float(prev["close"]) and close > float(last["open"]) and float(prev["close"]) < float(prev["open"])
-    is_bear_engulf = close < float(prev["close"]) and close < float(last["open"]) and float(prev["close"]) > float(prev["open"])
-    add("Two-Candle Price Action", "BUY" if is_bull_engulf else "SELL" if is_bear_engulf else "WAIT", "Candlestick momentum & engulfing confirmation")
-    
+    add("2. Fibonacci & Equilibrium (50%)",
+        "BUY" if close > equilibrium and close >= fib_low else ("SELL" if close < equilibrium and close <= fib_high else "WAIT"),
+        f"Equilibrium midpoint {equilibrium:.5f} discount/premium check")
+
+    # --------------------------------------------------------------------------
+    # 3. Breakout Strategy
+    # Detail: Triggers when price cleanly closes above the previous 20-candle high or below the low.
+    # --------------------------------------------------------------------------
+    add("3. Breakout Strategy",
+        "BUY" if close > prior_high else ("SELL" if close < prior_low else "WAIT"),
+        "Close breaking previous 20-candle high/low range boundary")
+
+    # 4. SMC Inducement (IDM) Trap (s5)
+    # Detail: Detects liquidity sweeps where price breaks a prior high/low temporarily 
+    # but reverses back inside, trapping retail breakout traders.
+    prev_close = float(prev["close"])
+    broke_up = prev_close > prior_high
+    broke_dn = prev_close < prior_low
+    add("4. SMC Inducement (IDM) Trap (s5)",
+        "SELL" if broke_up and close < prior_high else ("BUY" if broke_dn and close > prior_low else "WAIT"),
+        "Possible liquidity sweep / inducement trap heuristic")
+
+    # 5. Trend Alignment (SMA20 / SMA50 Filter)
+    # Detail: Ensures trades are taken only in the direction of the moving average trend.
+    add("5. Trend Alignment (SMA20/50)",
+        "BUY" if sma20 > sma50 and close > sma20 else ("SELL" if sma20 < sma50 and close < sma20 else "WAIT"),
+        "SMA20/SMA50 institutional trend alignment filter")
+
+    # 6. Two-Candle Engulfing Price Action (s3)
+    # Detail: Looks for strong bullish or bearish engulfing candle formations after indecision.
+    is_bull_engulf = close > prev_close and close > open_p and prev_close < float(prev["open"])
+    is_bear_engulf = close < prev_close and close < open_p and prev_close > float(prev["open"])
+    add("6. Two-Candle Engulfing (s3)",
+        "BUY" if is_bull_engulf else ("SELL" if is_bear_engulf else "WAIT"),
+        "Engulfing-style confirmation candle formation")
+
+    # 7. Fair Value Gap - FVG (s5-fvg)
+    # Detail: Identifies 3-candle institutional imbalance gaps where rapid momentum left an unfilled zone.
     bullish_fvg = float(prev2["high"]) < float(last["low"])
     bearish_fvg = float(prev2["low"]) > float(last["high"])
-    add("Fair Value Gap (FVG)", "BUY" if bullish_fvg else "SELL" if bearish_fvg else "WAIT", "Unmitigated institutional price imbalance gap")
-    
-    fib_50 = prior_low + (prior_high - prior_low) * 0.5
-    is_3bull = (float(last["close"]) > float(last["open"])) and (float(prev["close"]) > float(prev["open"])) and (float(prev2["close"]) > float(prev2["open"]))
-    is_3bear = (float(last["close"]) < float(last["open"])) and (float(prev["close"]) < float(prev["open"])) and (float(prev2["close"]) < float(prev2["open"]))
-    add("Supply & Demand Zones", "BUY" if is_3bull or (close >= fib_50 and close > float(last["open"])) else "SELL" if is_3bear or (close <= fib_50 and close < float(last["open"])) else "WAIT", "Aggressive SD momentum and Fibonacci golden zone")
-    
+    add("7. Fair Value Gap (FVG) (s5-fvg)",
+        "BUY" if bullish_fvg else ("SELL" if bearish_fvg else "WAIT"),
+        "Three-candle institutional imbalance gap heuristic")
+
+    # 8. Supply & Demand Zones (s6)
+    # Detail: Marks aggressive buying/selling origin zones at extreme range boundaries.
+    add("8. Supply & Demand Zones (s6)",
+        "BUY" if close < prior_low + width * 0.25 else ("SELL" if close > prior_low + width * 0.75 else "WAIT"),
+        "Range-extreme supply & demand zone reaction test")
+
+    # 9. Multi-Timeframe Trend Alignment (YouTube s1)
+    # Detail: Enforces alignment between broader structural bias and immediate behavior.
+    s1_vote = "BUY" if sma20 > sma50 and close > sma20 else ("SELL" if sma20 < sma50 and close < sma20 else "WAIT")
+    add("9. Multi-Timeframe Trend (s1)", s1_vote, "Higher & behavior timeframe structural alignment")
+
+    # 10. Impulse vs. Corrective Shift (YouTube s2)
+    # Detail: Compares candle body expansion to spot momentum shifts and trend reversals.
+    recent_body = abs(close - open_p)
+    prev_body = abs(float(prev["close"]) - float(prev["open"]))
+    s2_vote = "BUY" if recent_body > prev_body and close > open_p else ("SELL" if recent_body > prev_body and close < open_p else "WAIT")
+    add("10. Impulse vs Corrective Shift (s2)", s2_vote, "Momentum expansion vs pullback size check")
+
     return df, pd.DataFrame(signals), atr
 
-def evaluate_and_close_trades(con, symbol, last_candle, pair_label=""):
-    trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (symbol,)).fetchall()
-    closed = 0
-    hi, lo = float(last_candle["high"]), float(last_candle["low"])
-    now_utc = datetime.now(timezone.utc)
-    
-    for trade in trades:
-        try:
-            created_time = pd.Timestamp(trade["created_at"])
-            if created_time.tzinfo is None:
-                created_time = created_time.tz_localize("UTC")
-        except (TypeError, ValueError):
-            continue
+def aggregate_signal(votes, threshold=6):
+    buys = int((votes["Signal"] == "BUY").sum())
+    sells = int((votes["Signal"] == "SELL").sum())
+    if buys >= threshold and sells < threshold:
+        return "BUY", buys, sells
+    if sells >= threshold and buys < threshold:
+        return "SELL", buys, sells
+    return "WAIT", buys, sells
 
-        side = trade["side"]
-        stop, target, entry, qty = float(trade["stop"]), float(trade["target"]), float(trade["entry"]), float(trade["quantity"])
-        exit_price, reason = None, None
-
-        if side == "BUY":
-            if lo <= stop:
-                exit_price, reason = stop, "Stop Loss"
-            elif hi >= target:
-                exit_price, reason = target, "Take Profit"
-        else:
-            if hi >= stop:
-                exit_price, reason = stop, "Stop Loss"
-            elif lo <= target:
-                exit_price, reason = target, "Take Profit"
-
-        # 15m 9s (909 seconds) Safe Time Exit
-        elapsed_seconds = (now_utc - created_time.to_pydatetime()).total_seconds()
-        if exit_price is None and elapsed_seconds >= 909.0:
-            fresh_candle, err = fetch_fresh_exit_candle(trade["symbol"], pair_label)
-            if fresh_candle is not None and "close" in fresh_candle:
-                exit_price = float(fresh_candle["close"])
-                reason = "Time Exit (15m 9s)"
-            else:
-                continue
-
-        if exit_price is not None:
-            exit_time_str = utc_now_str()
-            duration_delta = now_utc - created_time.to_pydatetime()
-            mins = int(duration_delta.total_seconds() // 60)
-            secs = int(duration_delta.total_seconds() % 60)
-            duration_str = f"{mins}m {secs}s"
-
+def create_paper_trade(pair, timeframe, side, last, atr, analyzed_df=None, votes=None):
+    with db_connect() as con:
+        open_count = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'").fetchone()[0]
+        if open_count >= 3:
+            return False, "Maximum 3 open paper trades allowed."
+        
+        entry = float(last["close"])
+        
+        # Structural Stop Loss & Take Profit calculations
+        if analyzed_df is not None and len(analyzed_df) >= 20:
+            recent_high = float(analyzed_df["high"].iloc[-20:].max())
+            recent_low = float(analyzed_df["low"].iloc[-20:].min())
+            
             if side == "BUY":
-                pnl = (exit_price - entry) * qty
+                stop = min(recent_low - (atr * 0.6), entry - (atr * 2.2))
+                target = max(recent_high, entry + abs(entry - stop) * 3.0)
             else:
-                pnl = (entry - exit_price) * qty
+                stop = max(recent_high + (atr * 0.6), entry + (atr * 2.2))
+                target = min(recent_low, entry - abs(stop - entry) * 3.0)
+        else:
+            stop_distance = max(float(atr) * 2.2, entry * 0.0018)
+            stop = entry - stop_distance if side == "BUY" else entry + stop_distance
+            target = entry + stop_distance * 3.0 if side == "BUY" else entry - stop_distance * 3.0
 
-            balance_updated = int(trade["balance_updated"] if "balance_updated" in trade.keys() else 0)
-            if balance_updated == 0:
-                bal_row = con.execute("SELECT value FROM app_settings WHERE key='virtual_balance'").fetchone()
-                current_balance = float(bal_row["value"]) if bal_row else 10000.0
-                new_balance = current_balance + pnl
-                con.execute("UPDATE app_settings SET value=? WHERE key='virtual_balance'", (str(new_balance),))
-                balance_updated = 1
+        stop_distance = abs(entry - stop)
+        balance = float(get_setting("virtual_balance", "10000") or 10000)
+        risk_cash = max(1.0, balance * 0.01)
+        quantity = min(risk_cash / stop_distance, 100000.0) if stop_distance > 0 else 1000.0
+        
+        note = ", ".join(votes.loc[votes["Signal"] == side, "Strategy"].tolist()) if votes is not None else "10 Master Strategies Execution"
+        
+        con.execute(
+            """INSERT INTO paper_trades
+            (created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note)
+            VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?)""",
+            (utc_now_str(), pair, timeframe, side, entry, stop, target, quantity, note),
+        )
+    return True, f"Paper trade created at {entry:.5f}; SL {stop:.5f}; TP {target:.5f}."
 
-            con.execute(
-                """UPDATE paper_trades 
-                   SET status='CLOSED', exit_price=?, exit_time=?, duration=?, pnl=?, exit_reason=?, balance_updated=? 
-                   WHERE id=?""",
-                (exit_price, exit_time_str, duration_str, pnl, reason, balance_updated, trade["id"])
-            )
-            closed += 1
-    return closed
-
-def manual_close_trade(trade_id, exit_price, reason="Manual Exit"):
+def close_paper_trade(trade_id, exit_price, reason="Manual Exit"):
     with db_connect() as con:
         trade = con.execute("SELECT * FROM paper_trades WHERE id=?", (trade_id,)).fetchone()
         if not trade or trade["status"] != "OPEN":
-            return False, "Trade nahi mila ya pehle hi closed hai."
-        
-        created_time = pd.Timestamp(trade["created_at"])
-        if created_time.tzinfo is None:
-            created_time = created_time.tz_localize("UTC")
-        now_utc = datetime.now(timezone.utc)
-        
-        side = trade["side"]
+            return False, "Trade not found or already closed."
         entry, qty = float(trade["entry"]), float(trade["quantity"])
-        
-        if side == "BUY":
-            pnl = (exit_price - entry) * qty
-        else:
-            pnl = (entry - exit_price) * qty
-        
-        duration_delta = now_utc - created_time.to_pydatetime()
-        mins = int(duration_delta.total_seconds() // 60)
-        secs = int(duration_delta.total_seconds() % 60)
-        duration_str = f"{mins}m {secs}s"
-        exit_time_str = utc_now_str()
-        
-        bal_row = con.execute("SELECT value FROM app_settings WHERE key='virtual_balance'").fetchone()
-        current_balance = float(bal_row["value"]) if bal_row else 10000.0
-        new_balance = current_balance + pnl
-        con.execute("UPDATE app_settings SET value=? WHERE key='virtual_balance'", (str(new_balance),))
-        
+        pnl = (exit_price - entry) * qty if trade["side"] == "BUY" else (entry - exit_price) * qty
+        created = pd.to_datetime(trade["created_at"], utc=True)
+        duration_seconds = max(0, int((datetime.now(timezone.utc) - created.to_pydatetime()).total_seconds()))
+        duration = f"{duration_seconds // 60}m {duration_seconds % 60}s"
+        balance = float(get_setting("virtual_balance", "10000") or 10000)
+        set_setting("virtual_balance", balance + pnl)
         con.execute(
-            """UPDATE paper_trades 
-               SET status='CLOSED', exit_price=?, exit_time=?, duration=?, pnl=?, exit_reason=?, balance_updated=1 
-               WHERE id=?""",
-            (exit_price, exit_time_str, duration_str, pnl, reason, trade_id)
+            """UPDATE paper_trades SET status='CLOSED',exit_price=?,exit_time=?,
+            duration=?,pnl=?,exit_reason=? WHERE id=?""",
+            (float(exit_price), utc_now_str(), duration, pnl, reason, trade_id),
         )
-    return True, f"Trade #{trade_id} successfully closed at {exit_price:.5f} | P/L: ${pnl:.2f}"
+    return True, f"Paper trade #{trade_id} closed. Simulated P/L: ${pnl:.2f}"
 
-def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, signals, pair_label, mt5_live_enabled):
-    open_count = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'").fetchone()[0]
-    if open_count >= 3:
-        return False, "Maximum 3 open trades ki limit poori ho chuki hai."
-    
-    entry = float(last_candle["close"])
-    stop_distance = max(float(atr) * 1.5, entry * 0.001)
-    
-    stop = entry - stop_distance if side == "BUY" else entry + stop_distance
-    target = entry + stop_distance * 3.0 if side == "BUY" else entry - stop_distance * 3.0
-    
-    risk_cash = max(10.0, float(balance) * 0.015)
-    qty = min(risk_cash / stop_distance, 100000.0)
-    
-    note = ", ".join(signals.loc[signals["Signal"] == side, "Strategy"].tolist()) if signals is not None else "Manual Execution"
-    
-    if mt5_live_enabled:
-        success, msg = execute_mt5_live_trade(pair_label, side, 0.1, stop, target)
-        if not success:
-            # Fallback alert ya message ke sath manual order database me insert karne ki suvidha taaki app crash na ho
-            return False, f"MT5 Live Execution Failed: {msg}. (Live mode off karke demo paper trade try karein)"
-        note += " [MT5 LIVE]"
-
-    con.execute("""INSERT INTO paper_trades(created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note,balance_updated)
-                  VALUES(?,?,?,?,?,?,?,?, 'OPEN', ?, 0)""", (utc_now_str(), symbol, timeframe, side, entry, stop, target, qty, note))
-    return True, f"Trade successfully created ({'MT5 Live' if mt5_live_enabled else 'Demo Simulator'} 1:3 R:R)."
-
-def background_monitor_worker():
-    while True:
-        time.sleep(60)
-        try:
-            with db_connect() as con:
-                open_trades = con.execute("SELECT DISTINCT symbol FROM paper_trades WHERE status='OPEN'").fetchall()
-                for ot in open_trades:
-                    sym = ot["symbol"]
-                    raw, err = fetch_candles(sym, "15m", "1d")
-                    if not raw.empty:
-                        evaluate_and_close_trades(con, sym, raw.iloc[-1])
-        except Exception:
-            pass
-
-@st.cache_resource
-def start_background_monitor():
-    t = threading.Thread(target=background_monitor_worker, daemon=True)
-    t.start()
-    return True
+def auto_evaluate_open_trades(pair, data):
+    if data.empty:
+        return
+    candle = data.iloc[-1]
+    high, low = float(candle["high"]), float(candle["low"])
+    to_close = []
+    with db_connect() as con:
+        trades = con.execute("SELECT * FROM paper_trades WHERE status='OPEN' AND symbol=?", (pair,)).fetchall()
+        for trade in trades:
+            side = trade["side"]
+            stop, target = float(trade["stop"]), float(trade["target"])
+            exit_price, reason = None, None
+            if side == "BUY":
+                if low <= stop:
+                    exit_price, reason = stop, "Stop Loss"
+                elif high >= target:
+                    exit_price, reason = target, "Take Profit"
+            else:
+                if high >= stop:
+                    exit_price, reason = stop, "Stop Loss"
+                elif low <= target:
+                    exit_price, reason = target, "Take Profit"
+            if exit_price is not None:
+                to_close.append((trade["id"], exit_price, reason))
+    for trade_id, price, reason in to_close:
+        close_paper_trade(trade_id, price, reason)
 
 init_db()
-start_background_monitor()
 
-# --- SIDEBAR CONTROLS ---
 with st.sidebar:
-    st.header("Settings & MT5 Link")
+    st.header("Settings & Confluence")
     pair_label = st.selectbox("Currency pair", list(PAIRS.keys()))
-    
-    signal_mode = st.selectbox(
-        "Signal mode",
-        ["Safe Mode", "Fast Mode"],
-        index=0,
-        help="Safe Mode: 5/8 votes. Fast Mode: 3/8 votes.",
-    )
-    vote_threshold = 5 if signal_mode == "Safe Mode" else 3
-    ticker = PAIRS[pair_label]
-    
-    balance_value = float(get_setting("virtual_balance", "10000") or 10000)
-    new_balance = st.number_input("Demo balance ($)", min_value=100.0, max_value=1_000_000.0, value=float(balance_value), step=100.0)
-    if st.button("Save balance", use_container_width=True):
-        set_setting("virtual_balance", new_balance)
+    signal_mode = st.selectbox("Signal Rigidity", ["Strict Confluence (6/10 Votes)", "Aggressive (4/10 Votes)"])
+    threshold = 6 if "Strict" in signal_mode else 4
+    current_balance = float(get_setting("virtual_balance", "10000") or 10000)
+    balance_input = st.number_input("Demo balance ($)", min_value=100.0, max_value=1_000_000.0, value=current_balance, step=100.0)
+    if st.button("Save demo balance", use_container_width=True):
+        set_setting("virtual_balance", balance_input)
         st.success("Demo balance saved.")
-        
-    mt5_live_setting = get_setting("mt5_live", "0") == "1"
-    new_mt5_live = st.toggle("Live Trading Mode (MT5)", value=mt5_live_setting, help="ON: Fetches live ticks directly from MT5 desktop terminal.")
-    if new_mt5_live != mt5_live_setting:
-        set_setting("mt5_live", "1" if new_mt5_live else "0")
+    auto_setting = get_setting("auto_paper", "0") == "1"
+    auto_toggle = st.toggle("Auto paper trading", value=auto_setting, help="Creates simulated trades when 10-strategy confluence qualifies.")
+    if auto_toggle != auto_setting:
+        set_setting("auto_paper", "1" if auto_toggle else "0")
         st.rerun()
-
-    auto_enabled = get_setting("auto_paper", "0") == "1"
-    new_auto = st.toggle("Auto trading bot", value=auto_enabled, help="Creates trades automatically based on signals.")
-    if new_auto != auto_enabled:
-        set_setting("auto_paper", "1" if new_auto else "0")
+    st.caption("All 10 Original & YouTube SMC strategies active with full descriptions.")
+    if st.button("🔄 Refresh market data", use_container_width=True):
+        st.cache_data.clear()
         st.rerun()
-        
-    st.button("🔄 Refresh market data", on_click=st.cache_data.clear, use_container_width=True)
 
 balance = float(get_setting("virtual_balance", "10000") or 10000)
-mt5_live_mode = get_setting("mt5_live", "0") == "1"
-
-analyzer_tab, library_tab, paper_tab, setup_tab = st.tabs(["📊 Analyzer", "🧠 Strategy Library", "🧾 Demo & Live Journal", "⚙️ Setup & Limits"])
+analyzer_tab, library_tab, journal_tab, setup_tab = st.tabs(
+    ["📊 10-Strategy Analyzer", "🧠 Strategy Library", "🧾 Paper Journal", "⚙️ Setup"]
+)
 
 with analyzer_tab:
-    st.subheader(f"{pair_label} — Multi-Timeframe & SD Suite {('(MT5 Direct Feed Active)' if mt5_live_mode else '(Demo Simulator Active)')}")
-    
-    tf_tabs = st.tabs(["🕒 H1 (1 hour)", "⚡ M15 (15 minutes)", "📅 D1 (1 day)"])
-    
-    for tf_idx, (tf_name, tf_info) in enumerate(TIMEFRAMES.items()):
-        with tf_tabs[tf_idx]:
-            interval = tf_info["interval"]
-            period = tf_info["period"]
-            timeframe_code = tf_info["code"]
-            
-            data, fetch_error = fetch_candles(ticker, interval, period, pair_label)
-            
-            with db_connect() as con:
-                all_open_trades = con.execute("SELECT DISTINCT symbol FROM paper_trades WHERE status='OPEN'").fetchall()
-                for ot in all_open_trades:
-                    sym = ot["symbol"]
-                    s_data, s_err = fetch_candles(sym, interval, period, pair_label)
-                    if not s_data.empty:
-                        evaluate_and_close_trades(con, sym, s_data.iloc[-1], pair_label)
-
+    st.subheader(f"{pair_label} — 10 Master Strategies Analysis")
+    tf_tabs = st.tabs(list(TIMEFRAMES.keys()))
+    for idx, (tf_name, tf_info) in enumerate(TIMEFRAMES.items()):
+        with tf_tabs[idx]:
+            data, fetch_error, source = fetch_candles(pair_label, tf_info)
             if fetch_error or data.empty:
-                st.error(fetch_error or f"Market data unavailable for {tf_name}.")
-            elif len(data) < 3:
-                st.warning(f"Signal banane ke liye {tf_name} par abhi candles kam hain.")
-            else:
-                analyzed, votes, atr = strategy_signals(data)
-                last = analyzed.iloc[-1]
-                buy_votes = int((votes["Signal"] == "BUY").sum())
-                sell_votes = int((votes["Signal"] == "SELL").sum())
-                signal = "BUY" if buy_votes >= vote_threshold else "SELL" if sell_votes >= vote_threshold else "WAIT"
+                st.error(fetch_error or "Market data unavailable.")
+                st.info("Check your Twelve Data API key in Streamlit Secrets. Yahoo Finance fallback is also available.")
+                continue
+            st.caption(f"Data source: {source} • Latest candle: {convert_utc_to_ist(data.iloc[-1]['time'])}")
+            if len(data) < 3:
+                st.warning("Not enough candles to calculate 10-strategy indicators.")
+                continue
+            analyzed, votes, atr = strategy_signals(data)
+            last = analyzed.iloc[-1]
+            signal, buys, sells = aggregate_signal(votes, threshold)
+            auto_now = get_setting("auto_paper", "0") == "1"
+            if auto_now and signal in ("BUY", "SELL"):
+                candle_key = f"auto_done_10s_{pair_label}_{tf_info['code']}"
                 candle_time = pd.Timestamp(last["time"]).isoformat()
-                pair_time_key = f"{ticker}|{timeframe_code}"
-                
-                try:
-                    last_trade_candles = json.loads(get_setting("last_trade_candles", "{}"))
-                    if not isinstance(last_trade_candles, dict):
-                        last_trade_candles = {}
-                except (TypeError, json.JSONDecodeError):
-                    last_trade_candles = {}
-                    
-                with db_connect() as con:
-                    closed_count = evaluate_and_close_trades(con, ticker, last, pair_label)
-                    if new_auto:
-                        if signal in ("BUY", "SELL"):
-                            if last_trade_candles.get(pair_time_key) == candle_time:
-                                st.info(f"[{tf_name}] Is candle par trade pehle hi create ho chuka hai.")
-                            else:
-                                made, msg = create_auto_trade(con, ticker, timeframe_code, signal, last, atr, balance, votes, pair_label, mt5_live_mode)
-                                if made:
-                                    last_trade_candles[pair_time_key] = candle_time
-                                    con_set_setting(con, "last_trade_candles", json.dumps(last_trade_candles))
-                                    st.success(msg)
-                                else:
-                                    st.warning(f"Trade create nahi hua: {msg}")
-                        else:
-                            st.caption(f"[{tf_name}] Signal WAIT hai.")
+                if get_setting(candle_key, "") != candle_time:
+                    made, message = create_paper_trade(pair_label, tf_info["code"], signal, last, atr, analyzed, votes)
+                    if made:
+                        set_setting(candle_key, candle_time)
+                        st.success("Auto 10-Strategy trade: " + message)
                     else:
-                        st.caption(f"[{tf_name}] Auto Trading OFF hai.")
+                        st.warning(message)
+            auto_evaluate_open_trades(pair_label, data)
 
-                # --- MANUAL EXECUTION PANEL PER TIMEFRAME ---
-                with st.expander(f"⚡ Manual Trade Execution Panel ({tf_name})", expanded=True):
-                    mc1, mc2, mc3 = st.columns(3)
-                    manual_side = mc1.selectbox("Select Direction", ["BUY", "SELL"], key=f"manual_side_{timeframe_code}")
-                    if mc3.button("🚀 Execute Manual Order", use_container_width=True, key=f"manual_btn_{timeframe_code}"):
-                        with db_connect() as man_con:
-                            m_made, m_msg = create_auto_trade(man_con, ticker, timeframe_code, manual_side, last, atr, balance, None, pair_label, mt5_live_mode)
-                            if m_made:
-                                st.success(m_msg)
-                                st.rerun()
-                            else:
-                                st.error(m_msg)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric(f"10-Strategy Signal", signal)
+            m2.metric("BUY Votes", f"{buys}/10")
+            m3.metric("SELL Votes", f"{sells}/10")
+            m4.metric("Latest Close", f"{float(last['close']):.5f}")
 
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric(f"Signal ({tf_name})", signal)
-                c2.metric("BUY votes", f"{buy_votes}/8")
-                c3.metric("SELL votes", f"{sell_votes}/8")
-                c4.metric("Latest close", f"{float(last['close']):.5f}")
+            chart = go.Figure()
+            chart.add_trace(go.Candlestick(
+                x=analyzed["time"], open=analyzed["open"], high=analyzed["high"],
+                low=analyzed["low"], close=analyzed["close"], name=pair_label,
+            ))
+            chart.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
+            chart.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma50"], name="SMA 50", mode="lines"))
+            chart.update_layout(
+                height=440, xaxis_rangeslider_visible=False,
+                margin=dict(l=10, r=10, t=25, b=10),
+                paper_bgcolor="#0b0f19", plot_bgcolor="#0b0f19",
+                font=dict(color="#f3f4f6"),
+            )
+            st.plotly_chart(chart, use_container_width=True)
 
-                fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name=f"{pair_label} {tf_name}")])
-                fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzones if 'analyzones' in locals() else analyzed["sma20"], name="SMA 20", mode="lines")) # Safe fallback
-                fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma50"], name="SMA 50", mode="lines"))
-                fig.update_layout(
-                    height=480, 
-                    xaxis_rangeslider_visible=False, 
-                    margin=dict(l=10, r=10, t=30, b=10),
-                    paper_bgcolor="#0b0f19",
-                    plot_bgcolor="#0b0f19",
-                    font=dict(color="#f3f4f6")
-                )
-                st.plotly_chart(fig, use_container_width=True)
+            st.subheader("All 10 Strategy Votes")
+            st.dataframe(votes, use_container_width=True, hide_index=True)
 
-                def color_signals(val):
-                    if val == "BUY":
-                        return "color: #2ecc71; font-weight: bold;"
-                    elif val == "SELL":
-                        return "color: #e74c3c; font-weight: bold;"
-                    elif val == "WAIT":
-                        return "color: #f1c40f; font-weight: bold;"
-                    return ""
-
-                st.subheader(f"8 Combined Strategy Votes ({tf_name})")
-                st.dataframe(votes.style.map(color_signals, subset=["Signal"]), use_container_width=True, hide_index=True)
+            with st.expander(f"Manual paper trade — {tf_info['code']}"):
+                direction = st.selectbox("Direction", ["BUY", "SELL"], key=f"direction_{tf_info['code']}")
+                if st.button("Execute 10-Strategy Trade", key=f"create_{tf_info['code']}", use_container_width=True):
+                    ok, msg = create_paper_trade(pair_label, tf_info["code"], direction, last, atr, analyzed, votes)
+                    (st.success if ok else st.error)(msg)
 
 with library_tab:
-    st.subheader("Strategy Library (SMC, Price Action, Supply & Demand & MTF Suite)")
+    st.subheader("Complete 10 Master Strategies Library & Detailed Descriptions")
+    st.markdown("""
+    Here is the complete training inventory of all **10 Master Strategies** integrated into BIG MAN2 Bot:
+    1. **Support / Resistance**: Evaluates structural zone boundaries and recent price positions.
+    2. **Fibonacci & Equilibrium (50%)**: Determines discount vs premium zones around the 50% midpoint.
+    3. **Breakout Strategy**: Captures momentum breaks past 20-candle high/low extremes.
+    4. **SMC Inducement (IDM) Trap (s5)**: Identifies liquidity sweeps and retail breakout traps.
+    5. **Trend Alignment (SMA20/50)**: Confirms institutional trend direction using moving averages.
+    6. **Two-Candle Engulfing (s3)**: Spots strong engulfing candles after indecision.
+    7. **Fair Value Gap (FVG) (s5-fvg)**: Detects 3-candle imbalance zones and rapid momentum gaps.
+    8. **Supply & Demand Zones (s6)**: Locates aggressive origin zones and wick rejection areas.
+    9. **Multi-Timeframe Trend (s1)**: Aligns higher timeframe structure with immediate behavior.
+    10. **Impulse vs Corrective Shift (s2)**: Measures candle body speed to spot momentum reversals.
+    """)
     st.dataframe(pd.DataFrame([
-        {"Strategy": "Support / Resistance", "Purpose": "Recent range structural levels"},
-        {"Strategy": "Fibonacci & Equilibrium (50%)", "Purpose": "Discount/Premium 50% midpoint entry"},
-        {"Strategy": "Breakout", "Purpose": "Structural range high/low break"},
-        {"Strategy": "SMC Inducement (IDM) Trap", "Purpose": "Smart Money liquidity sweep & trap detection"},
-        {"Strategy": "Multi-Timeframe Trend Alignment", "Purpose": "4H Direction, 1H Behavior, 15m Entry alignment"},
-        {"Strategy": "Two-Candle Price Action", "Purpose": "Bullish/Bearish engulfing confirmation"},
-        {"Strategy": "Fair Value Gap (FVG)", "Purpose": "Unmitigated institutional price imbalance gap"},
-        {"Strategy": "Supply & Demand Zones", "Purpose": "Aggressive SD momentum and Fibonacci golden zone"},
+        {"Strategy #1": "Support / Resistance", "Detail": "Recent range structural levels"},
+        {"Strategy #2": "Fibonacci & Equilibrium (50%)", "Detail": "Range midpoint and discount/premium heuristic"},
+        {"Strategy #3": "Breakout Strategy", "Detail": "Previous range high/low break"},
+        {"Strategy #4": "SMC Inducement (IDM) Trap", "Detail": "Possible liquidity sweep heuristic"},
+        {"Strategy #5": "Trend Alignment (SMA20/50)", "Detail": "SMA20/SMA50 trend filter"},
+        {"Strategy #6": "Two-Candle Engulfing (s3)", "Detail": "Engulfing-style candle confirmation"},
+        {"Strategy #7": "Fair Value Gap (FVG)", "Detail": "Three-candle gap imbalance heuristic"},
+        {"Strategy #8": "Supply & Demand Zones (s6)", "Detail": "Range-extreme supply & demand zones"},
+        {"Strategy #9": "Multi-Timeframe Trend (s1)", "Detail": "Higher & behavior timeframe alignment"},
+        {"Strategy #10": "Impulse vs Corrective Shift (s2)", "Detail": "Momentum expansion vs pullback size check"}
     ]), use_container_width=True, hide_index=True)
 
-with paper_tab:
+with journal_tab:
     st.subheader("Active Open Trades — Manual Management")
-    with db_connect() as open_con:
-        open_df = pd.read_sql_query("SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY id DESC", open_con)
-    
+    with db_connect() as con:
+        open_df = pd.read_sql_query(
+            "SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY id DESC", con
+        )
     if open_df.empty:
-        st.info("Abhi koi open trade nahi hai.")
+        st.info("No open paper trades.")
     else:
         for _, row in open_df.iterrows():
-            col_a, col_b, col_c, col_d = st.columns([2, 2, 2, 2])
-            col_a.write(f"**ID #{row['id']}** | {row['symbol']} [{row['timeframe']}] ({row['side']})")
-            col_b.write(f"Entry: `{row['entry']}`")
-            col_c.write(f"SL: `{row['stop']}` | TP: `{row['target']}`")
-            if col_d.button(f"Close Trade #{row['id']}", key=f"manual_close_{row['id']}"):
-                fresh_c, err = fetch_fresh_exit_candle(row['symbol'], pair_label)
-                exit_price_val = float(fresh_c["close"]) if fresh_c is not None and "close" in fresh_c else float(row['entry'])
-                ok, msg = manual_close_trade(row['id'], exit_price_val, "Manual Exit")
-                if ok:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
+            c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
+            c1.write(f"**#{row['id']}** {row['symbol']} [{row['timeframe']}] {row['side']}")
+            c2.write(f"Entry: `{row['entry']:.5f}`")
+            c3.write(f"SL: `{row['stop']:.5f}` · TP: `{row['target']:.5f}`")
+            if c4.button("Close trade", key=f"close_{row['id']}_{row['created_at']}"):
+                exit_price = float(row["entry"])
+                close_data, _, _ = fetch_candles(row["symbol"], TIMEFRAMES["M15 (15 minutes)"])
+                if not close_data.empty:
+                    exit_price = float(close_data.iloc[-1]["close"])
+                ok, msg = close_paper_trade(int(row["id"]), exit_price)
+                (st.success if ok else st.error)(msg)
+                st.rerun()
 
     st.markdown("---")
-    st.subheader("Demo & Live Trade Journal (IST Timings)")
-    
-    current_balance_val = float(get_setting("virtual_balance", "10000") or 10000)
-    
-    with db_connect() as journal_con:
-        trades = pd.read_sql_query("""
-            SELECT id AS 'Trade ID', 
-                   symbol AS 'Currency Pair', 
-                   timeframe AS 'Timeframe',
-                   side AS 'Side', 
-                   entry AS 'Entry Price', 
-                   created_at AS 'Entry Time (UTC)', 
-                   stop AS 'Stop Loss', 
-                   target AS 'Take Profit', 
-                   exit_price AS 'Exit Price', 
-                   exit_time AS 'Exit Time (UTC)', 
-                   duration AS 'Duration', 
-                   status AS 'Status', 
-                   pnl AS 'P/L ($)', 
-                   exit_reason AS 'Exit Reason',
-                   strategy_note AS 'Strategy Note'
-            FROM paper_trades 
-            ORDER BY id DESC
-        """, journal_con)
-
-    win_rate, profit_factor = 0.0, 0.0
-    if not trades.empty:
-        trades['Entry Time'] = trades['Entry Time (UTC)'].apply(convert_utc_to_ist)
-        trades['Exit Time'] = trades['Exit Time (UTC)'].apply(convert_utc_to_ist)
-        
-        display_trades = trades.drop(columns=['Entry Time (UTC)', 'Exit Time (UTC)'])
-        cols = ['Trade ID', 'Currency Pair', 'Timeframe', 'Side', 'Entry Price', 'Entry Time', 'Stop Loss', 'Take Profit', 'Exit Price', 'Exit Time', 'Duration', 'Status', 'P/L ($)', 'Exit Reason', 'Strategy Note']
-        existing_cols = [c for c in cols if c in display_trades.columns]
-        display_trades = display_trades[existing_cols]
-
-        closed_trades = trades[trades["Status"] == "CLOSED"].copy()
-        closed_trades["P/L ($)"] = pd.to_numeric(closed_trades["P/L ($)"], errors="coerce").fillna(0)
-        total_realized_pnl = closed_trades["P/L ($)"].sum()
-
-        if len(closed_trades) > 0:
-            wins = closed_trades[closed_trades["P/L ($)"] > 0]
-            losses = closed_trades[closed_trades["P/L ($)"] < 0]
-            win_rate = (len(wins) / len(closed_trades)) * 100
-
-            gross_wins = wins["P/L ($)"].sum()
-            gross_losses = abs(losses["P/L ($)"].sum())
-            profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else (99.0 if gross_wins > 0 else 0.0)
+    st.subheader("Paper trade journal (IST)")
+    with db_connect() as con:
+        trades = pd.read_sql_query("SELECT * FROM paper_trades ORDER BY id DESC", con)
+    if trades.empty:
+        st.info("No paper trades recorded yet.")
     else:
-        display_trades = trades
-        total_realized_pnl = 0.0
-
-    bm1, bm2, bm3, bm4, bm5,bm6 = st.columns(6)
-    bm1.metric("Demo Balance", f"${current_balance_val:,.2f}")
-    bm2.metric("Realized P/L", f"${total_realized_pnl:,.2f}")
-    bm3.metric("Win Rate", f"{win_rate:.1f}%")
-    bm4.metric("Profit Factor", f"{profit_factor:.2f}")
-    bm5.metric("Total Trades", len(trades))
-    bm6.metric("Open Trades", int((trades["Status"] == "OPEN").sum()) if not trades.empty else 0)
-
-    if display_trades.empty:
-        st.info("Abhi koi trade record nahi hai.")
-    else:
-        st.dataframe(display_trades, use_container_width=True, hide_index=True)
-        st.download_button("Download trade journal CSV", display_trades.to_csv(index=False).encode("utf-8"), file_name="big_man2_ultimate_trades.csv", mime="text/csv")
+        trades["Entry Time (IST)"] = trades["created_at"].apply(convert_utc_to_ist)
+        trades["Exit Time (IST)"] = trades["exit_time"].apply(convert_utc_to_ist)
+        closed = trades[trades["status"] == "CLOSED"]
+        pnl_series = pd.to_numeric(closed["pnl"], errors="coerce").fillna(0)
+        wins = int((pnl_series > 0).sum())
+        win_rate = (wins / len(closed) * 100) if len(closed) else 0.0
+        total_pnl = float(pnl_series.sum()) if len(closed) else 0.0
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Demo balance", f"${float(get_setting('virtual_balance', '10000')):,.2f}")
+        c2.metric("Realized simulated P/L", f"${total_pnl:,.2f}")
+        c3.metric("Win rate", f"{win_rate:.1f}%")
+        c4.metric("Total trades", len(trades))
+        display_cols = [
+            "id", "symbol", "timeframe", "side", "entry", "Entry Time (IST)",
+            "stop", "target", "exit_price", "Exit Time (IST)", "duration",
+            "status", "pnl", "exit_reason", "strategy_note",
+        ]
+        st.dataframe(trades[display_cols], use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download paper journal CSV",
+            trades[display_cols].to_csv(index=False).encode("utf-8"),
+            file_name="big_man2_10strategy_journal.csv",
+            mime="text/csv",
+        )
 
 with setup_tab:
-    st.subheader("Setup & Instructions")
+    st.subheader("Setup & Institutional Rules")
     st.markdown("""
-    - **BIG MAN2 Ultimate Pro:** Manual Execution buttons ko safe error handling ke sath update kar diya gaya hai.
-    - **Timeframe Separation:** H1, M15, aur D1 ke liye alag alag charts aur execution panels.
-    - **Timezone:** Timestamps automatically Indian Standard Time (IST) me convert hote hain.
-    """)
-    if st.button("Clear cached market data"):
-        st.cache_data.clear()
-        st.success("Cache cleared.")
+- Configure your Twelve Data API key under Streamlit Secrets: `TWELVE_DATA_API_KEY = "your_actual_key"`
+- **10 Master Strategy Confluence:** Aggregates votes across all foundational indicators (Breakout, Support/Resistance, S&D, FVG) and advanced YouTube Price Lesson Hindi concepts (Multi-timeframe `s1`, Impulse/Corrective `s2`, Engulfing `s3`, IDM traps `s5`).
+- **Structural Stop-Loss:** SL is placed safely beyond recent 20-candle swing highs/lows with ATR buffer to prevent market noise hunting.
+- **Paper Trading Only:** This version does not send live broker orders. Export your CSV journal periodically.
+""")
