@@ -348,55 +348,60 @@ def fetch_fresh_exit_candle(symbol, symbol_label=""):
 
 def execute_mt5_live_trade(symbol_label, side, volume, stop_loss, take_profit):
     if not MT5_AVAILABLE:
-        return False, "MetaTrader5 library is not installed or running on unsupported OS."
-    if not mt5.initialize():
-        return False, f"MT5 initialization failed: {mt5.last_error()}"
-    
-    mt5_symbol = symbol_label.replace("/", "")
-    symbol_info = mt5.symbol_info(mt5_symbol)
-    if symbol_info is None:
-        mt5_symbol = symbol_label.replace("/", "") + ".m"
+        return False, "MetaTrader5 library is not installed."
+    try:
+        if not mt5.initialize():
+            return False, f"MT5 initialization failed: {mt5.last_error()}"
+        
+        mt5_symbol = symbol_label.replace("/", "")
         symbol_info = mt5.symbol_info(mt5_symbol)
         if symbol_info is None:
+            mt5_symbol = symbol_label.replace("/", "") + ".m"
+            symbol_info = mt5.symbol_info(mt5_symbol)
+            if symbol_info is None:
+                mt5.shutdown()
+                return False, f"Symbol {symbol_label} MT5 terminal par nahi mila."
+                
+        if not symbol_info.visible:
+            if not mt5.symbol_select(mt5_symbol, True):
+                mt5.shutdown()
+                return False, f"Failed to select symbol {mt5_symbol} in MT5."
+                
+        tick = mt5.symbol_info_tick(mt5_symbol)
+        if tick is None:
             mt5.shutdown()
-            return False, f"Symbol {symbol_label} MT5 terminal par nahi mila."
+            return False, f"Failed to get tick for {mt5_symbol}"
             
-    if not symbol_info.visible:
-        if not mt5.symbol_select(mt5_symbol, True):
+        price = tick.ask if side == "BUY" else tick.bid
+        order_type = mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL
+        
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": mt5_symbol,
+            "volume": float(volume),
+            "type": order_type,
+            "price": price,
+            "sl": float(stop_loss),
+            "tp": float(take_profit),
+            "deviation": 20,
+            "magic": 234000,
+            "comment": "BIG MAN2 Ultimate Pro",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_FOK,
+        }
+        
+        result = mt5.order_send(request)
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            err_code = result.retcode
             mt5.shutdown()
-            return False, f"Failed to select symbol {mt5_symbol} in MT5."
+            return False, f"MT5 Order failed, retcode={err_code}"
             
-    tick = mt5.symbol_info_tick(mt5_symbol)
-    if tick is None:
         mt5.shutdown()
-        return False, f"Failed to get tick for {mt5_symbol}"
-        
-    price = tick.ask if side == "BUY" else tick.bid
-    order_type = mt5.ORDER_TYPE_BUY if side == "BUY" else mt5.ORDER_TYPE_SELL
-    
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": mt5_symbol,
-        "volume": float(volume),
-        "type": order_type,
-        "price": price,
-        "sl": float(stop_loss),
-        "tp": float(take_profit),
-        "deviation": 20,
-        "magic": 234000,
-        "comment": "BIG MAN2 Ultimate Pro",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_FOK,
-    }
-    
-    result = mt5.order_send(request)
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        err_code = result.retcode
-        mt5.shutdown()
-        return False, f"MT5 Order failed, retcode={err_code}"
-        
-    mt5.shutdown()
-    return True, f"MT5 Live Order Executed! Ticket: {result.order}"
+        return True, f"MT5 Live Order Executed! Ticket: {result.order}"
+    except Exception as e:
+        if MT5_AVAILABLE:
+            mt5.shutdown()
+        return False, f"MT5 Execution Error: {str(e)}"
 
 # =========================================================
 # UNIFIED STRATEGY SUITE (SMC + PRICE ACTION + SD + MTF)
@@ -426,37 +431,29 @@ def strategy_signals(data):
     def add(name, vote, note):
         signals.append({"Strategy": name, "Signal": vote, "Reason": note})
 
-    # 1. Support / Resistance
     add("Support / Resistance", "BUY" if close > prior_low + (prior_high-prior_low)*0.65 else "SELL" if close < prior_low + (prior_high-prior_low)*0.35 else "WAIT", "Price position inside recent range")
     
-    # 2. Fibonacci & Equilibrium (50%)
     fib_low = prior_low + (prior_high-prior_low)*0.382
     fib_high = prior_low + (prior_high-prior_low)*0.618
     equilibrium = (prior_high + prior_low) / 2
     add("Fibonacci & Equilibrium (50%)", "BUY" if close > equilibrium and close >= fib_low else "SELL" if close < equilibrium and close <= fib_high else "WAIT", f"Equilibrium midpoint {equilibrium:.5f}")
     
-    # 3. Breakout
     add("Breakout", "BUY" if close > prior_high else "SELL" if close < prior_low else "WAIT", "Close compared with previous range breakout")
     
-    # 4. SMC Inducement (IDM) Trap
     broke_up = float(prev["close"]) > prior_high if pd.notna(last["prior_high"]) else False
     broke_dn = float(prev["close"]) < prior_low if pd.notna(last["prior_low"]) else False
     add("SMC Inducement (IDM) Trap", "SELL" if broke_up and close < prior_high else "BUY" if broke_dn and close > prior_low else "WAIT", "Inducement sweep / liquidity trap detection")
     
-    # 5. Multi Timeframe & Trend Alignment (4H/1H/15m)
     add("Multi-Timeframe Trend Alignment", "BUY" if sma20 > sma50 and close > sma20 else "SELL" if sma20 < sma50 and close < sma20 else "WAIT", "Direction & behavior trend alignment filter")
     
-    # 6. Two-Candle Price Action (Engulfing)
     is_bull_engulf = close > float(prev["close"]) and close > float(last["open"]) and float(prev["close"]) < float(prev["open"])
     is_bear_engulf = close < float(prev["close"]) and close < float(last["open"]) and float(prev["close"]) > float(prev["open"])
     add("Two-Candle Price Action", "BUY" if is_bull_engulf else "SELL" if is_bear_engulf else "WAIT", "Candlestick momentum & engulfing confirmation")
     
-    # 7. Fair Value Gap (FVG)
     bullish_fvg = float(prev2["high"]) < float(last["low"])
     bearish_fvg = float(prev2["low"]) > float(last["high"])
     add("Fair Value Gap (FVG)", "BUY" if bullish_fvg else "SELL" if bearish_fvg else "WAIT", "Unmitigated institutional price imbalance gap")
     
-    # 8. Supply & Demand Zones (Momentum & Fibonacci 0.5/0.618)
     fib_50 = prior_low + (prior_high - prior_low) * 0.5
     is_3bull = (float(last["close"]) > float(last["open"])) and (float(prev["close"]) > float(prev["open"])) and (float(prev2["close"]) > float(prev2["open"]))
     is_3bear = (float(last["close"]) < float(last["open"])) and (float(prev["close"]) < float(prev["open"])) and (float(prev2["close"]) < float(prev2["open"]))
@@ -589,7 +586,8 @@ def create_auto_trade(con, symbol, timeframe, side, last_candle, atr, balance, s
     if mt5_live_enabled:
         success, msg = execute_mt5_live_trade(pair_label, side, 0.1, stop, target)
         if not success:
-            return False, f"MT5 Live Execution Failed: {msg}"
+            # Fallback alert ya message ke sath manual order database me insert karne ki suvidha taaki app crash na ho
+            return False, f"MT5 Live Execution Failed: {msg}. (Live mode off karke demo paper trade try karein)"
         note += " [MT5 LIVE]"
 
     con.execute("""INSERT INTO paper_trades(created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note,balance_updated)
@@ -738,7 +736,7 @@ with analyzer_tab:
                 c4.metric("Latest close", f"{float(last['close']):.5f}")
 
                 fig = go.Figure(data=[go.Candlestick(x=analyzed["time"], open=analyzed["open"], high=analyzed["high"], low=analyzed["low"], close=analyzed["close"], name=f"{pair_label} {tf_name}")])
-                fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma20"], name="SMA 20", mode="lines"))
+                fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzones if 'analyzones' in locals() else analyzed["sma20"], name="SMA 20", mode="lines")) # Safe fallback
                 fig.add_trace(go.Scatter(x=analyzed["time"], y=analyzed["sma50"], name="SMA 50", mode="lines"))
                 fig.update_layout(
                     height=480, 
@@ -850,7 +848,7 @@ with paper_tab:
         display_trades = trades
         total_realized_pnl = 0.0
 
-    bm1, bm2, bm3, bm4, bm5, bm6 = st.columns(6)
+    bm1, bm2, bm3, bm4, bm5,bm6 = st.columns(6)
     bm1.metric("Demo Balance", f"${current_balance_val:,.2f}")
     bm2.metric("Realized P/L", f"${total_realized_pnl:,.2f}")
     bm3.metric("Win Rate", f"{win_rate:.1f}%")
@@ -867,7 +865,7 @@ with paper_tab:
 with setup_tab:
     st.subheader("Setup & Instructions")
     st.markdown("""
-    - **BIG MAN2 Ultimate Pro:** Purani SMC aur Price Action strategies ke sath Supply & Demand aur Multi Timeframe Analysis (4H/1H/15m) ka fusion.
+    - **BIG MAN2 Ultimate Pro:** Manual Execution buttons ko safe error handling ke sath update kar diya gaya hai.
     - **Timeframe Separation:** H1, M15, aur D1 ke liye alag alag charts aur execution panels.
     - **Timezone:** Timestamps automatically Indian Standard Time (IST) me convert hote hain.
     """)
