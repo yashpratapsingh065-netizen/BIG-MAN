@@ -647,7 +647,7 @@ with analyzer_tab:
                     m_made, m_msg = create_auto_trade(man_con, ticker, timeframe_code, manual_side, last, atr, balance, None, pair_label, mt5_live_mode)
                     if m_made:
                         st.success(m_msg)
-                        st.rerun()  # FIXED TYPO HERE
+                        st.rerun()
                     else:
                         st.error(m_msg)
 
