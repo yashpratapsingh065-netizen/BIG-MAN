@@ -120,7 +120,6 @@ def set_setting(key, value):
         )
 
 def fetch_twelve_data(pair_label, interval, outputsize=500):
-    """Fetch OHLC candles from Twelve Data using Streamlit Secrets."""
     try:
         api_key = st.secrets.get("TWELVE_DATA_API_KEY", "")
     except Exception:
@@ -283,19 +282,37 @@ def aggregate_signal(votes, threshold):
         return "SELL", buys, sells
     return "WAIT", buys, sells
 
-def create_paper_trade(pair, timeframe, side, last, atr, votes=None):
+def create_paper_trade(pair, timeframe, side, last, atr, analyzed_df=None, votes=None):
     with db_connect() as con:
         open_count = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'").fetchone()[0]
         if open_count >= 3:
             return False, "Maximum 3 open paper trades allowed."
+        
         entry = float(last["close"])
-        stop_distance = max(float(atr) * 1.5, entry * 0.001)
-        stop = entry - stop_distance if side == "BUY" else entry + stop_distance
-        target = entry + stop_distance * 3 if side == "BUY" else entry - stop_distance * 3
+        
+        # Enhanced structural SL/TP calculations to avoid premature stop-outs
+        if analyzed_df is not None and len(analyzed_df) >= 20:
+            recent_high = float(analyzed_df["high"].iloc[-20:].max())
+            recent_low = float(analyzed_df["low"].iloc[-20:].min())
+            
+            if side == "BUY":
+                stop = min(recent_low - (atr * 0.5), entry - (atr * 2.0))
+                target = max(recent_high, entry + abs(entry - stop) * 2.5)
+            else:
+                stop = max(recent_high + (atr * 0.5), entry + (atr * 2.0))
+                target = min(recent_low, entry - abs(stop - entry) * 2.5)
+        else:
+            stop_distance = max(float(atr) * 2.0, entry * 0.0015)
+            stop = entry - stop_distance if side == "BUY" else entry + stop_distance
+            target = entry + stop_distance * 2.5 if side == "BUY" else entry - stop_distance * 2.5
+
+        stop_distance = abs(entry - stop)
         balance = float(get_setting("virtual_balance", "10000") or 10000)
         risk_cash = max(1.0, balance * 0.01)
-        quantity = min(risk_cash / stop_distance, 100000.0)
+        quantity = min(risk_cash / stop_distance, 100000.0) if stop_distance > 0 else 1000.0
+        
         note = ", ".join(votes.loc[votes["Signal"] == side, "Strategy"].tolist()) if votes is not None else "Manual paper trade"
+        
         con.execute(
             """INSERT INTO paper_trades
             (created_at,symbol,timeframe,side,entry,stop,target,quantity,status,strategy_note)
@@ -399,7 +416,7 @@ with analyzer_tab:
                 candle_key = f"auto_done_{pair_label}_{tf_info['code']}"
                 candle_time = pd.Timestamp(last["time"]).isoformat()
                 if get_setting(candle_key, "") != candle_time:
-                    made, message = create_paper_trade(pair_label, tf_info["code"], signal, last, atr, votes)
+                    made, message = create_paper_trade(pair_label, tf_info["code"], signal, last, atr, analyzed, votes)
                     if made:
                         set_setting(candle_key, candle_time)
                         st.success("Auto paper trade: " + message)
@@ -434,7 +451,7 @@ with analyzer_tab:
             with st.expander(f"Manual paper trade — {tf_info['code']}"):
                 direction = st.selectbox("Direction", ["BUY", "SELL"], key=f"direction_{tf_info['code']}")
                 if st.button("Create paper trade", key=f"create_{tf_info['code']}", use_container_width=True):
-                    ok, msg = create_paper_trade(pair_label, tf_info["code"], direction, last, atr, votes)
+                    ok, msg = create_paper_trade(pair_label, tf_info["code"], direction, last, atr, analyzed, votes)
                     (st.success if ok else st.error)(msg)
 
 with library_tab:
@@ -466,7 +483,6 @@ with journal_tab:
             c2.write(f"Entry: `{row['entry']:.5f}`")
             c3.write(f"SL: `{row['stop']:.5f}` · TP: `{row['target']:.5f}`")
             if c4.button("Close trade", key=f"close_{row['id']}"):
-                # Use latest available close when possible; otherwise entry is a neutral fallback.
                 exit_price = float(row["entry"])
                 close_data, _, _ = fetch_candles(row["symbol"], TIMEFRAMES["M15 (15 minutes)"])
                 if not close_data.empty:
