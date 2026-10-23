@@ -11,7 +11,7 @@ import requests
 # Indian Standard Time (IST) Offset: UTC + 5:30
 IST = timezone(timedelta(hours=5, minutes=30))
 
-st.set_page_config(page_title="BIG MAN2 | Price Action & SMC Bot", page_icon="📈", layout="wide")
+st.set_page_config(page_title="BIG MAN2 | Ultimate Price Action & SMC Bot", page_icon="📈", layout="wide")
 
 DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_price_action.db")
 SYMBOLS = {
@@ -26,10 +26,8 @@ INTERVALS = {"15 min": ("15min", "15m"), "1 hour": ("1h", "1h"), "4 hours": ("4h
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
-    # Drop table to ensure clean schema alignment with IST columns
-    con.execute("DROP TABLE IF EXISTS price_action_log")
     con.execute("""
-        CREATE TABLE price_action_log (
+        CREATE TABLE IF NOT EXISTS price_action_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -82,9 +80,9 @@ def get_data(symbol_label, interval_label, rows=250):
     except Exception:
         return pd.DataFrame(), "No data"
 
-def analyze_price_action(df):
-    if len(df) < 25:
-        return {"bias":"WAIT", "pattern":"Kam candles hain", "details":"Kam se kam 25 candles chahiye analysis ke liye."}
+def analyze_8_strategies(df):
+    if len(df) < 30:
+        return {"bias":"WAIT", "pattern":"Kam candles hain", "details":"Kam se kam 30 candles chahiye sabhi 8 strategies check karne ke liye."}
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -99,98 +97,158 @@ def analyze_price_action(df):
     prior_high = float(recent.high.max())
     prior_low = float(recent.low.min())
     
+    # Premium & Discount Zone calculation
     swing_high = float(df.high.tail(50).max())
     swing_low = float(df.low.tail(50).min())
     eq_level = (swing_high + swing_low) / 2.0
     zone = "PREMIUM (Sell Zone)" if last.close > eq_level else "DISCOUNT (Buy Zone)"
     
-    patterns = []
-    bias = "WAIT"
+    strategies = []
+    bullish_score = 0
+    bearish_score = 0
 
+    # 1. SMC Bullish/Bearish FVG (Fair Value Gap)
     if last.low > p_prev.high and prev.close > prev.open:
-        if last.close < eq_level:
-            patterns.append("Bullish FVG (SMC Buy Signal)")
-            bias = "BUY"
-        else:
-            patterns.append("Bullish FVG (Premium Zone)")
-            
+        strategies.append("1. Bullish FVG Imbalance")
+        bullish_score += 2
     elif last.high < p_prev.low and prev.close < prev.open:
-        if last.close > eq_level:
-            patterns.append("Bearish FVG (SMC Sell Signal)")
-            bias = "SELL"
-        else:
-            patterns.append("Bearish FVG (Discount Zone)")
+        strategies.append("1. Bearish FVG Imbalance")
+        bearish_score += 2
 
+    # 2. Premium & Discount Zone Filter
+    if last.close < eq_level:
+        strategies.append("2. Discount Zone (Buy Territory)")
+        bullish_score += 1
+    else:
+        strategies.append("2. Premium Zone (Sell Territory)")
+        bearish_score += 1
+
+    # 3. Bullish/Bearish Engulfing
     if last.close > last.open and prev.close < prev.open and last.open <= prev.close and last.close >= prev.open:
-        patterns.append("Bullish Engulfing")
-        if bias == "WAIT": bias = "BUY"
+        strategies.append("3. Engulfing Candle Pattern")
+        bullish_score += 2
     elif last.close < last.open and prev.close > prev.open and last.open >= prev.close and last.close <= prev.open:
-        patterns.append("Bearish Engulfing")
-        if bias == "WAIT": bias = "SELL"
+        strategies.append("3. Engulfing Candle Pattern")
+        bearish_score += 2
 
+    # 4. Pin Bar / Rejection Wick
     if lower_wick >= body * 2 and lower_wick >= rng * 0.45 and last.close > last.open:
-        patterns.append("Bullish Pin Bar / Rejection")
-        if bias == "WAIT": bias = "BUY"
+        strategies.append("4. Bullish Rejection Pin Bar")
+        bullish_score += 2
     elif upper_wick >= body * 2 and upper_wick >= rng * 0.45 and last.close < last.open:
-        patterns.append("Bearish Pin Bar / Rejection")
-        if bias == "WAIT": bias = "SELL"
+        strategies.append("4. Bearish Rejection Pin Bar")
+        bearish_score += 2
 
+    # 5. 20-Candle Breakout
     if last.close > prior_high:
-        patterns.append("High Breakout")
-        if bias == "WAIT": bias = "BUY"
+        strategies.append("5. 20-Candle High Breakout")
+        bullish_score += 2
     elif last.close < prior_low:
-        patterns.append("Low Breakout")
-        if bias == "WAIT": bias = "SELL"
+        strategies.append("5. 20-Candle Low Breakout")
+        bearish_score += 2
 
-    if not patterns:
-        patterns = ["Koi clear Signal nahi hai abhi"]
+    # 6. Momentum Body vs Wick Rule
+    if body > rng * 0.7:
+        if last.close > last.open:
+            strategies.append("6. Strong Bullish Momentum")
+            bullish_score += 1
+        else:
+            strategies.append("6. Strong Bearish Momentum")
+            bearish_score += 1
 
-    details_msg = f"Current Market Zone: **{zone}** (Equilibrium: {eq_level:.5f}). High: {swing_high:.5f}, Low: {swing_low:.5f}."
+    # 7. Moving Average Trend Context (SMA 20 vs 50)
+    sma20 = float(df.close.tail(20).mean())
+    sma50 = float(df.close.tail(50).mean()) if len(df) >= 50 else sma20
+    if sma20 > sma50:
+        strategies.append("7. Uptrend Context (SMA20 > 50)")
+        bullish_score += 1
+    else:
+        strategies.append("7. Downtrend Context (SMA20 < 50)")
+        bearish_score += 1
+
+    # 8. Inside Bar Consolidation Check
+    if last.high < prev.high and last.low > prev.low:
+        strategies.append("8. Inside Bar Compression")
+    else:
+        strategies.append("8. Expansion / Active Range")
+
+    # Final Bias decision based on scores
+    if bullish_score > bearish_score and bullish_score >= 3:
+        bias = "BUY"
+    elif bearish_score > bullish_score and bearish_score >= 3:
+        bias = "SELL"
+    else:
+        bias = "WAIT"
+
+    if not strategies:
+        strategies = ["No active strategy trigger"]
+
+    details_msg = f"Zone: **{zone}** (EQ: {eq_level:.5f}) | Bullish Score: {bullish_score} | Bearish Score: {bearish_score}"
 
     return {
         "bias": bias,
-        "pattern": ", ".join(patterns),
+        "pattern": " | ".join(strategies),
         "details": details_msg,
     }
 
-def log_analysis(con, symbol, timeframe, df, result):
+def log_analysis(con, symbol, timeframe, df, result, action_tag="SCAN"):
     candle_time_ist = df.index[-1].strftime('%Y-%m-%d %I:%M:%S %p IST') if not df.empty else ""
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     close = float(df.close.iloc[-1]) if not df.empty else None
+    pattern_text = f"[{action_tag}] " + result["pattern"]
     
     con.execute(
         "INSERT INTO price_action_log(created_at_ist,symbol,timeframe,candle_time_ist,close,pattern,bias,details) VALUES(?,?,?,?,?,?,?,?)",
         (created_at_ist, symbol, timeframe, candle_time_ist, close,
-         result["pattern"], result["bias"], result["details"])
+         pattern_text, result["bias"], result["details"])
     )
     con.commit()
 
 # --- STREAMLIT UI ---
-st.title("⚡ Price Action & SMC Trading Bot")
-st.caption("Price Lesson Strategies: Supply & Demand, Fair Value Gap (FVG), Premium & Discount Zones.")
+st.title("⚡ BIG MAN2 — Ultimate SMC & Price Action Bot")
+st.caption("8 Strategies Integrated: FVG, Premium/Discount Zones, Engulfing, Pin Bars, Breakouts, Momentum & Trend Confluence.")
 
 with st.sidebar:
     st.header("⚙️ Controls")
     symbol = st.selectbox("Pair Select Karein", list(SYMBOLS.keys()))
     timeframe = st.selectbox("Timeframe Select Karein", list(INTERVALS.keys()), index=1)
-    run_analysis = st.button("🔍 Scan / Generate Signal", type="primary", use_container_width=True)
+    run_analysis = st.button("🔍 Scan All 8 Strategies", type="primary", use_container_width=True)
+    
+    st.markdown("---")
+    st.subheader("🤖 Demo Trade Execution")
+    lot_size = st.number_input("Lot Size / Units", min_value=0.01, max_value=10.0, value=0.1, step=0.01)
+    col_b1, col_b2 = st.columns(2)
+    sim_buy = col_b1.button("🟢 Demo Buy", use_container_width=True)
+    sim_sell = col_b2.button("🔴 Demo Sell", use_container_width=True)
 
 con = connect_db()
 df, source = get_data(symbol, timeframe)
 
 if not df.empty:
-    result = analyze_price_action(df)
+    result = analyze_8_strategies(df)
+    
+    # Handle Demo Trade Simulation Clicks
+    if sim_buy:
+        log_analysis(con, symbol, timeframe, df, result, action_tag=f"DEMO BUY ({lot_size} Lot)")
+        st.sidebar.success(f"Demo BUY Order Executed for {symbol} at {float(df.close.iloc[-1]):.5f}!")
+    elif sim_sell:
+        log_analysis(con, symbol, timeframe, df, result, action_tag=f"DEMO SELL ({lot_size} Lot)")
+        st.sidebar.error(f"Demo SELL Order Executed for {symbol} at {float(df.close.iloc[-1]):.5f}!")
+    elif run_analysis:
+        log_analysis(con, symbol, timeframe, df, result, action_tag="SCAN")
+        st.success("Scan results saved to database history!")
+
     col1, col2, col3 = st.columns(3)
     col1.metric("Live Rate", f"{float(df.close.iloc[-1]):.5f}")
     
     if result["bias"] == "BUY":
-        col2.success("🟢 BUY SIGNAL")
+        col2.success("🟢 BUY SIGNAL (Confluence Met)")
     elif result["bias"] == "SELL":
-        col2.error("🔴 SELL SIGNAL")
+        col2.error("🔴 SELL SIGNAL (Confluence Met)")
     else:
-        col2.warning("🟡 WAIT (No Clear Trade)")
+        col2.warning("🟡 WAIT (Awaiting Setup)")
         
-    col3.markdown(f"**Detected Strategy:**\n{result['pattern']}")
+    col3.markdown(f"**Strategy Confluence:**\n{result['pattern']}")
 
 st.divider()
 
@@ -224,7 +282,7 @@ with left:
     components.html(html, height=510, scrolling=False)
 
 with right:
-    st.subheader("💡 Analysis Details")
+    st.subheader("💡 8-Strategy Breakdown")
     if df.empty:
         st.error("Market Data load nahi ho pa raha hai.")
     else:
@@ -234,25 +292,21 @@ with right:
         view = df.tail(6).copy()
         view.index = view.index.strftime('%d %b %I:%M %p')
         st.dataframe(view, use_container_width=True)
-        
-        if run_analysis:
-            log_analysis(con, symbol, timeframe, df, result)
-            st.success("Signal Saved to Local History!")
 
 st.divider()
 
-st.subheader("📋 Trade Signal History (IST Time)")
+st.subheader("📋 Trade Signal & Demo Order History (IST Time)")
 try:
     logs = pd.read_sql_query(
         "SELECT created_at_ist, symbol, timeframe, candle_time_ist, close, pattern, bias, details FROM price_action_log ORDER BY id DESC LIMIT 50",
         con,
     )
     if logs.empty:
-        st.info("Abhi tak koi signal save nahi hua hai. 'Scan / Generate Signal' button dabayein.")
+        st.info("Abhi tak koi signal save nahi hua hai.")
     else:
-        logs.columns = ['Created At', 'Pair', 'TF', 'Candle Time', 'Close Rate', 'Strategy Pattern', 'Signal', 'Zone Info']
+        logs.columns = ['Time', 'Pair', 'TF', 'Candle Time', 'Close Rate', 'Strategies Triggered', 'Signal', 'Score Info']
         st.dataframe(logs, use_container_width=True)
 except Exception:
-    st.info("Database table reset ho rahi hai. Ek baar 'Scan / Generate Signal' button dabayein.")
+    st.info("Database table refresh ho rahi hai.")
 
 con.close()
