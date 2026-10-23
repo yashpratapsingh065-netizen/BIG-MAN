@@ -30,7 +30,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS auto_trade_journal_gold_v4 (
+        CREATE TABLE IF NOT EXISTS auto_trade_journal_gold_v5 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT DEFAULT '-',
@@ -222,7 +222,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.1):
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
-        "INSERT INTO auto_trade_journal_gold_v4 (created_at_ist, closed_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO auto_trade_journal_gold_v5 (created_at_ist, closed_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (created_at_ist, "-", symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, 0.0)
     )
     con.commit()
@@ -237,16 +237,16 @@ def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "UPDATE auto_trade_journal_gold_v4 SET status = 'CLOSED', closed_at_ist = ?, exit_price = ?, pnl = ? WHERE id = ?",
+        "UPDATE auto_trade_journal_gold_v5 SET status = 'CLOSED', closed_at_ist = ?, exit_price = ?, pnl = ? WHERE id = ?",
         (closed_at_ist, round(current_price, 2), pnl_usd, trade_id)
     )
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
-def check_auto_exit_conditions(con, current_price, current_df_index, timeframe_label):
+def check_auto_exit_conditions(con, current_price, timeframe_label):
     cursor = con.cursor()
-    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM auto_trade_journal_gold_v4 WHERE status = 'OPEN'")
+    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM auto_trade_journal_gold_v5 WHERE status = 'OPEN'")
     open_trades = cursor.fetchall()
     
     tf_minutes = INTERVALS[timeframe_label]["minutes"]
@@ -272,7 +272,7 @@ def check_auto_exit_conditions(con, current_price, current_df_index, timeframe_l
                 exit_p = sl
                 closed = True
                 
-        # 2. Time-based Expiry Check (e.g. 15 min complete hone par auto close)
+        # 2. Exact Timeframe Expiry Check (jaise 15 min complete hone par)
         if not closed and tf == timeframe_label:
             try:
                 entry_dt = datetime.strptime(entry_time_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
@@ -288,7 +288,7 @@ def check_auto_exit_conditions(con, current_price, current_df_index, timeframe_l
 
 # --- STREAMLIT UI ---
 st.title("🪙 BIG MAN2 — Gold (XAUUSD) Master Bot")
-st.caption("Professional Multi-Trade Engine with Time-Expiry & Auto TP/SL Close + $500 Balance")
+st.caption("Professional Multi-Trade Engine with Strict Time-Expiry & TP/SL Auto-Close + $500 Balance")
 
 con = connect_db()
 
@@ -298,7 +298,7 @@ with st.sidebar:
     timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
     lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.1, step=0.01)
     
-    if st.button("🔄 Refresh Market Data & Check Trades", use_container_width=True):
+    if st.button("🔄 Refresh Market & Auto-Close Trades", use_container_width=True):
         st.toast("Market refreshed & checking time/TP/SL!", icon="🔄")
     
     st.markdown("---")
@@ -325,8 +325,8 @@ if not df.empty:
     result = evaluate_master_strategies(df)
     current_live_price = float(df.close.iloc[-1])
     
-    # Check Auto TP/SL and Time Expiry on every refresh/interaction
-    check_auto_exit_conditions(con, current_live_price, df.index[-1], timeframe)
+    # Check Time Expiry and TP/SL automatically on refresh/interaction
+    check_auto_exit_conditions(con, current_live_price, timeframe)
     
     if auto_mode:
         execute_auto_trade(con, symbol, timeframe, result, lot_size=lot_input)
@@ -383,10 +383,10 @@ with right:
 
 st.divider()
 
-st.subheader("📋 Active Open Trades (Time & TP/SL Monitor)")
+st.subheader("📋 Active Open Trades (Strict Time & TP/SL Expiry)")
 
 open_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit FROM auto_trade_journal_gold_v4 WHERE status = 'OPEN' ORDER BY id DESC",
+    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit FROM auto_trade_journal_gold_v5 WHERE status = 'OPEN' ORDER BY id DESC",
     con,
 )
 
@@ -409,7 +409,7 @@ st.divider()
 
 st.subheader("📜 Closed Trades History")
 closed_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, pnl FROM auto_trade_journal_gold_v4 WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30",
+    "SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, pnl FROM auto_trade_journal_gold_v5 WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30",
     con,
 )
 
