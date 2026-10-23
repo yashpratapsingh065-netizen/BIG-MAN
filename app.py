@@ -11,23 +11,22 @@ import requests
 # Indian Standard Time (IST) Offset: UTC + 5:30
 IST = timezone(timedelta(hours=5, minutes=30))
 
-st.set_page_config(page_title="BIG MAN2 | Master Trading Bot", page_icon="📈", layout="wide")
+st.set_page_config(page_title="BIG MAN2 | Gold XAUUSD Trading Bot", page_icon="🪙", layout="wide")
 
-DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_price_action.db")
+DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_gold_bot.db")
+
+# Replaced Forex Pairs with XAUUSD (Gold)
 SYMBOLS = {
+    "XAU/USD (Gold)": {"tv": "OANDA:XAUUSD", "yf": "GC=F", "td": "XAU/USD"},
     "EUR/USD": {"tv": "FX:EURUSD", "yf": "EURUSD=X", "td": "EUR/USD"},
     "GBP/USD": {"tv": "FX:GBPUSD", "yf": "GBPUSD=X", "td": "GBP/USD"},
-    "USD/JPY": {"tv": "FX:USDJPY", "yf": "JPY=X", "td": "USD/JPY"},
-    "AUD/USD": {"tv": "FX:AUDUSD", "yf": "AUDUSD=X", "td": "AUD/USD"},
-    "USD/CAD": {"tv": "FX:USDCAD", "yf": "CAD=X", "td": "USD/CAD"},
-    "USD/CHF": {"tv": "FX:USDCHF", "yf": "CHF=X", "td": "USD/CHF"},
 }
 INTERVALS = {"15 min": ("15min", "15m"), "1 hour": ("1h", "1h"), "4 hours": ("4h", "1h"), "1 day": ("1day", "1d")}
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS auto_trade_journal_v3 (
+        CREATE TABLE IF NOT EXISTS auto_trade_journal_gold (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT DEFAULT '-',
@@ -127,7 +126,7 @@ def evaluate_master_strategies(df):
     if last.close < eq_50:
         bullish_votes.append("Discount Zone")
     else:
-        bearish_votes.append("Premium Zone")
+        bullish_votes.append("Premium Zone")
 
     if abs(last.close - ote_618) <= (diff * 0.05):
         if last.close > ote_618:
@@ -164,7 +163,7 @@ def evaluate_master_strategies(df):
     if sma20 > sma50:
         bullish_votes.append("Uptrend SMA")
     else:
-        bullish_votes.append("Downtrend SMA")
+        bearish_votes.append("Downtrend SMA")
 
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
@@ -177,12 +176,16 @@ def evaluate_master_strategies(df):
         bias = "BUY" if last.close > prev.close else "SELL"
 
     current_close = float(last.close)
+    # Gold (XAUUSD) ke liye SL/TP range points (Volatility ke hisab se)
+    sl_buffer = max(rng * 1.5, 2.0)
+    tp_buffer = max(rng * 3.0, 4.0)
+
     if bias == "BUY":
-        sl = current_close - (rng * 1.5)
-        tp = current_close + (rng * 3.0)
+        sl = current_close - sl_buffer
+        tp = current_close + tp_buffer
     else:
-        sl = current_close + (rng * 1.5)
-        tp = current_close - (rng * 3.0)
+        sl = current_close + sl_buffer
+        tp = current_close - tp_buffer
 
     all_votes_str = f"Bull [{b_score}]: {', '.join(bullish_votes)} | Bear [{s_score}]: {', '.join(bearish_votes)}"
 
@@ -191,9 +194,9 @@ def evaluate_master_strategies(df):
         "votes": all_votes_str,
         "bullish": b_score,
         "bearish": s_score,
-        "entry": round(current_close, 5),
-        "sl": round(sl, 5),
-        "tp": round(tp, 5)
+        "entry": round(current_close, 2),
+        "sl": round(sl, 2),
+        "tp": round(tp, 2)
     }
 
 def get_current_balance(con):
@@ -212,38 +215,39 @@ def update_balance(con, delta):
 def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.1):
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     con.execute(
-        "INSERT INTO auto_trade_journal_v3(created_at_ist, closed_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO auto_trade_journal_gold(created_at_ist, closed_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (created_at_ist, "-", symbol, timeframe, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, 0.0)
     )
     con.commit()
 
 def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size=0.1):
+    # Gold (XAUUSD) PnL calculation: 1 point price movement = $10 per 0.1 lot (or standard 1 lot = $100 per point)
     if bias == "BUY":
-        pips = (current_price - entry_price) * 10000
+        diff = current_price - entry_price
     else:
-        pips = (entry_price - current_price) * 10000
+        diff = entry_price - current_price
         
-    pnl_usd = round(pips * lot_size * 10, 2)
+    pnl_usd = round(diff * lot_size * 100, 2)
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "UPDATE auto_trade_journal_v3 SET status = 'CLOSED', closed_at_ist = ?, exit_price = ?, pnl = ? WHERE id = ?",
-        (closed_at_ist, round(current_price, 5), pnl_usd, trade_id)
+        "UPDATE auto_trade_journal_gold SET status = 'CLOSED', closed_at_ist = ?, exit_price = ?, pnl = ? WHERE id = ?",
+        (closed_at_ist, round(current_price, 2), pnl_usd, trade_id)
     )
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
 # --- STREAMLIT UI ---
-st.title("📈 BIG MAN2 — Master Trading Bot")
-st.caption("Professional Multi-Trade Execution Engine with $500 Demo Balance")
+st.title("🪙 BIG MAN2 — Gold (XAUUSD) Master Bot")
+st.caption("Professional Multi-Trade Execution Engine for Gold with $500 Demo Balance")
 
 con = connect_db()
 curr_balance = get_current_balance(con)
 
 with st.sidebar:
     st.header("⚙️ Control Panel")
-    symbol = st.selectbox("Currency Pair", list(SYMBOLS.keys()))
+    symbol = st.selectbox("Select Asset", list(SYMBOLS.keys()), index=0)
     timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
     lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.1, step=0.01)
     
@@ -254,12 +258,12 @@ with st.sidebar:
     st.subheader("⚡ Execution Mode")
     auto_mode = st.toggle("Enable Auto-Pilot", value=False)
     
-    if st.button("➕ Open New Trade Now", use_container_width=True):
+    if st.button("➕ Open New Gold Trade", use_container_width=True):
         df_temp, _ = get_data(symbol, timeframe)
         if not df_temp.empty:
             res_temp = evaluate_master_strategies(df_temp)
             execute_auto_trade(con, symbol, timeframe, res_temp, lot_size=lot_input)
-            st.sidebar.success("New trade opened!")
+            st.sidebar.success("Gold trade opened!")
 
     st.markdown("---")
     if st.button("🔄 Reset Demo Balance ($500)", use_container_width=True):
@@ -280,7 +284,7 @@ if not df.empty:
     st.markdown(f"### 💵 Account Balance: **${curr_balance:,.2f} USD** {bal_color}")
     
     col1, col2, col3 = st.columns(3)
-    col1.metric("Live Market Rate", f"{result['entry']:.5f}")
+    col1.metric("Live Gold Rate", f"{result['entry']:.2f}")
     col2.metric("Signal Bias", result["bias"])
     col3.metric("Strategy Votes", f"Bull: {result['bullish']} | Bear: {result['bearish']}")
 
@@ -289,7 +293,7 @@ st.divider()
 left, right = st.columns([1.8, 1])
 
 with left:
-    st.subheader(f"📈 Live Chart ({symbol})")
+    st.subheader(f"📈 Live Gold Chart ({symbol})")
     tv_symbol = SYMBOLS[symbol]["tv"]
     tv_interval = {"15 min":"15", "1 hour":"60", "4 hours":"240", "1 day":"D"}[timeframe]
     html = f"""
@@ -316,10 +320,10 @@ with left:
     components.html(html, height=490, scrolling=False)
 
 with right:
-    st.subheader("💡 Market Analysis")
+    st.subheader("💡 Gold Market Analysis")
     if not df.empty:
         st.write(f"**Strategy Confluence:** {result['votes']}")
-        st.write(f"**Stop Loss:** `{result['sl']:.5f}` | **Take Profit:** `{result['tp']:.5f}`")
+        st.write(f"**Stop Loss:** `{result['sl']:.2f}` | **Take Profit:** `{result['tp']:.2f}`")
         st.markdown("---")
         view = df.tail(4).copy()
         view.index = view.index.strftime('%d %b %I:%M %p')
@@ -327,10 +331,10 @@ with right:
 
 st.divider()
 
-st.subheader("📋 Active Open Trades")
+st.subheader("📋 Active Open Trades (Gold)")
 
 open_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, symbol, bias, lot_size, entry_price, stop_loss, take_profit FROM auto_trade_journal_v3 WHERE status = 'OPEN' ORDER BY id DESC",
+    "SELECT id, created_at_ist, symbol, bias, lot_size, entry_price, stop_loss, take_profit FROM auto_trade_journal_gold WHERE status = 'OPEN' ORDER BY id DESC",
     con,
 )
 
@@ -341,8 +345,8 @@ else:
         with st.container(border=True):
             c1, c2, c3, c4 = st.columns([2, 1.5, 1.5, 1])
             c1.markdown(f"**ID #{row['id']} | {row['symbol']}** ({row['bias']} - {row['lot_size']} Lot)\n\n🕒 Entry Time: `{row['created_at_ist']}`")
-            c2.markdown(f"📍 **Entry:** `{row['entry_price']:.5f}`\n🛑 **SL:** `{row['stop_loss']:.5f}`")
-            c3.markdown(f"🎯 **TP:** `{row['take_profit']:.5f}`\n⚡ **Status:** `OPEN`")
+            c2.markdown(f"📍 **Entry:** `{row['entry_price']:.2f}`\n🛑 **SL:** `{row['stop_loss']:.2f}`")
+            c3.markdown(f"🎯 **TP:** `{row['take_profit']:.2f}`\n⚡ **Status:** `OPEN`")
             if c4.button(f"Close #{row['id']}", key=f"close_open_{row['id']}"):
                 current_p = float(df.close.iloc[-1]) if not df.empty else row['entry_price']
                 pnl_realized = close_single_trade(con, row['id'], current_p, row['bias'], row['entry_price'], row['lot_size'])
@@ -353,7 +357,7 @@ st.divider()
 
 st.subheader("📜 Closed Trades History")
 closed_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, closed_at_ist, symbol, bias, lot_size, entry_price, exit_price, pnl FROM auto_trade_journal_v3 WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30",
+    "SELECT id, created_at_ist, closed_at_ist, symbol, bias, lot_size, entry_price, exit_price, pnl FROM auto_trade_journal_gold WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30",
     con,
 )
 
