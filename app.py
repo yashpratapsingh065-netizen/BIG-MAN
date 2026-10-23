@@ -96,50 +96,42 @@ def evaluate_master_strategies(df):
     upper_wick = last.high - max(last.open, last.close)
     lower_wick = min(last.open, last.close) - last.low
     
-    # Swing High & Low for Fibonacci Equilibrium & Supply/Demand
     swing_high = float(df.high.tail(50).max())
     swing_low = float(df.low.tail(50).min())
     diff = swing_high - swing_low
     
-    # Fibonacci Levels (0.5 Equilibrium and 0.618 OTE)
     eq_50 = swing_high - (diff * 0.50)
     ote_618 = swing_high - (diff * 0.618)
     
     bullish_votes = []
     bearish_votes = []
 
-    # 1. Fair Value Gap (FVG) Strategy
     if last.low > p_prev.high and prev.close > prev.open:
-        bullish_votes.append("Bullish FVG Imbalance")
+        bullish_votes.append("Bullish FVG")
     elif last.high < p_prev.low and prev.close < prev.open:
-        bearish_votes.append("Bearish FVG Imbalance")
+        bearish_votes.append("Bearish FVG")
 
-    # 2. Premium / Discount Zone (Fibonacci 50% Equilibrium)
     if last.close < eq_50:
-        bullish_votes.append("Discount Zone (Below 0.5 EQ)")
+        bullish_votes.append("Discount Zone")
     else:
-        bearish_votes.append("Premium Zone (Above 0.5 EQ)")
+        bearish_votes.append("Premium Zone")
 
-    # 3. Fibonacci OTE (0.618 Confluence)
     if abs(last.close - ote_618) <= (diff * 0.05):
         if last.close > ote_618:
-            bullish_votes.append("Fibonacci 0.618 OTE Buy Bounce")
+            bullish_votes.append("Fib 0.618 OTE Buy")
         else:
-            bearish_votes.append("Fibonacci 0.618 OTE Sell Rejection")
+            bearish_votes.append("Fib 0.618 OTE Sell")
 
-    # 4. Supply & Demand Zone Rejection
     if lower_wick >= body * 1.5 and last.close > last.open:
-        bullish_votes.append("Demand Zone Wick Rejection")
+        bullish_votes.append("Demand Wick")
     elif upper_wick >= body * 1.5 and last.close < last.open:
-        bearish_votes.append("Supply Zone Wick Rejection")
+        bearish_votes.append("Supply Wick")
 
-    # 5. Engulfing Pattern
     if last.close > last.open and prev.close < prev.open and last.open <= prev.close and last.close >= prev.open:
         bullish_votes.append("Bullish Engulfing")
     elif last.close < last.open and prev.close > prev.open and last.open >= prev.close and last.close <= prev.open:
         bearish_votes.append("Bearish Engulfing")
 
-    # 6. Breakout Strategy
     recent = df.iloc[-21:-1]
     prior_high = float(recent.high.max())
     prior_low = float(recent.low.min())
@@ -148,31 +140,27 @@ def evaluate_master_strategies(df):
     elif last.close < prior_low:
         bearish_votes.append("Support Breakdown")
 
-    # 7. Momentum Candle
     if body > rng * 0.6:
         if last.close > last.open:
-            bullish_votes.append("Strong Bullish Momentum")
+            bullish_votes.append("Momentum Up")
         else:
-            bearish_votes.append("Strong Bearish Momentum")
+            bullish_votes.append("Momentum Down")
 
-    # 8. Moving Average Trend (SMA 20 vs 50)
     sma20 = float(df.close.tail(20).mean())
     sma50 = float(df.close.tail(50).mean()) if len(df) >= 50 else sma20
     if sma20 > sma50:
-        bullish_votes.append("Uptrend SMA Context")
+        bullish_votes.append("Uptrend SMA")
     else:
-        bullish_votes.append("Downtrend SMA Context")
+        bullish_votes.append("Downtrend SMA")
 
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
 
-    # Flexible Threshold: Agar 2 ya usse zyada votes mil jayein toh trade bias banega
     if b_score > s_score and b_score >= 2:
         bias = "BUY"
     elif s_score > b_score and s_score >= 2:
         bias = "SELL"
     else:
-        # Default fallback to active momentum if scores are tied
         bias = "BUY" if last.close > prev.close else "SELL"
 
     current_close = float(last.close)
@@ -183,7 +171,7 @@ def evaluate_master_strategies(df):
         sl = current_close + (rng * 1.5)
         tp = current_close - (rng * 3.0)
 
-    all_votes_str = f"Bullish [{b_score}]: {', '.join(bullish_votes) if bullish_votes else 'None'} | Bearish [{s_score}]: {', '.join(bearish_votes) if bearish_votes else 'None'}"
+    all_votes_str = f"Bull [{b_score}]: {', '.join(bullish_votes)} | Bear [{s_score}]: {', '.join(bearish_votes)}"
 
     return {
         "bias": bias,
@@ -196,38 +184,29 @@ def evaluate_master_strategies(df):
     }
 
 def execute_auto_trade(con, symbol, timeframe, result):
-    cursor = con.cursor()
-    cursor.execute("SELECT id FROM auto_trade_journal WHERE symbol = ? AND status = 'OPEN'", (symbol,))
-    existing = cursor.fetchone()
-    
-    if not existing and result["bias"] in ("BUY", "SELL"):
-        created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
-        con.execute(
-            "INSERT INTO auto_trade_journal(created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (created_at_ist, symbol, timeframe, result["entry"], result["sl"], result["tp"], "OPEN", result["bias"], result["votes"], 0.0, 0.0)
-        )
-        con.commit()
+    # Multiple trades allow karne ke liye existing check hata diya hai
+    created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
+    con.execute(
+        "INSERT INTO auto_trade_journal(created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (created_at_ist, symbol, timeframe, result["entry"], result["sl"], result["tp"], "OPEN", result["bias"], result["votes"], 0.0, 0.0)
+    )
+    con.commit()
 
-def close_open_trades(con, symbol, current_price):
-    cursor = con.cursor()
-    cursor.execute("SELECT id, bias, entry_price FROM auto_trade_journal WHERE symbol = ? AND status = 'OPEN'", (symbol,))
-    open_trades = cursor.fetchall()
-    
-    for tid, bias, entry in open_trades:
-        if bias == "BUY":
-            pnl = (current_price - entry) * 10000
-        else:
-            pnl = (entry - current_price) * 10000
-            
-        con.execute(
-            "UPDATE auto_trade_journal SET status = 'CLOSED', exit_price = ?, pnl = ? WHERE id = ?",
-            (current_price, round(pnl, 2), tid)
-        )
-        con.commit()
+def close_single_trade(con, trade_id, current_price, bias, entry_price):
+    if bias == "BUY":
+        pnl = (current_price - entry_price) * 10000
+    else:
+        pnl = (entry_price - current_price) * 10000
+        
+    con.execute(
+        "UPDATE auto_trade_journal SET status = 'CLOSED', exit_price = ?, pnl = ? WHERE id = ?",
+        (current_price, round(pnl, 2), trade_id)
+    )
+    con.commit()
 
 # --- STREAMLIT UI ---
-st.title("📈 BIG MAN2 — Master Video-Based Trading Bot")
-st.caption("Supply & Demand, FVG, Fibonacci OTE (0.618), Equilibrium Zones & 8-Strategy Voting Engine.")
+st.title("📈 BIG MAN2 — Master Trading Bot")
+st.caption("Professional Multi-Trade Execution & Strategy Engine")
 
 with st.sidebar:
     st.header("⚙️ Control Panel")
@@ -235,23 +214,20 @@ with st.sidebar:
     timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
     
     if st.button("🔄 Refresh Market Data", use_container_width=True):
-        st.toast("Market refreshed successfully!", icon="🔄")
+        st.toast("Market refreshed!", icon="🔄")
     
     st.markdown("---")
-    st.subheader("⚡ Auto-Trading Bot")
+    st.subheader("⚡ Execution Mode")
     auto_mode = st.toggle("Enable Auto-Pilot", value=False)
-    if auto_mode:
-        st.success("🟢 Bot is actively trading based on video strategies!")
-    else:
-        st.warning("🟡 Bot is in Monitoring mode.")
-        
-    st.markdown("---")
-    if st.button("🔴 Close Open Trades", use_container_width=True):
+    
+    # Manual Trade Trigger button
+    if st.button("➕ Open New Trade Now", use_container_width=True):
         con_temp = connect_db()
         df_temp, _ = get_data(symbol, timeframe)
         if not df_temp.empty:
-            close_open_trades(con_temp, symbol, float(df_temp.close.iloc[-1]))
-            st.sidebar.success("Trades closed!")
+            res_temp = evaluate_master_strategies(df_temp)
+            execute_auto_trade(con_temp, symbol, timeframe, res_temp)
+            st.sidebar.success("New trade opened successfully!")
         con_temp.close()
 
 con = connect_db()
@@ -263,30 +239,17 @@ if not df.empty:
     if auto_mode:
         execute_auto_trade(con, symbol, timeframe, result)
 
-    st.markdown("### 📊 Expert Voting & Strategy Dashboard")
-    
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     col1.metric("Live Price", f"{result['entry']:.5f}")
-    col2.metric("Bullish Votes", f"{result['bullish']} / 8")
-    col3.metric("Bearish Votes", f"{result['bearish']} / 8")
-    
-    if result["bias"] == "BUY":
-        col4.success("🟢 MASTER SIGNAL: BUY")
-    else:
-        col4.error("🔴 MASTER SIGNAL: SELL")
-
-    st.info(f"**Video Strategy Confluence:** {result['votes']}")
-    
-    c_l1, c_l2 = st.columns(2)
-    c_l1.metric("Stop Loss (SL)", f"{result['sl']:.5f}")
-    c_l2.metric("Take Profit (TP)", f"{result['tp']:.5f}")
+    col2.metric("Signal Bias", result["bias"])
+    col3.metric("Strategy Votes", f"Bull: {result['bullish']} | Bear: {result['bearish']}")
 
 st.divider()
 
 left, right = st.columns([1.8, 1])
 
 with left:
-    st.subheader(f"📈 Live TradingView Chart ({symbol})")
+    st.subheader(f"📈 Live Chart ({symbol})")
     tv_symbol = SYMBOLS[symbol]["tv"]
     tv_interval = {"15 min":"15", "1 hour":"60", "4 hours":"240", "1 day":"D"}[timeframe]
     html = f"""
@@ -313,28 +276,43 @@ with left:
     components.html(html, height=490, scrolling=False)
 
 with right:
-    st.subheader("💡 Recent Candles (IST)")
-    if df.empty:
-        st.error("Data load nahi ho pa raha hai.")
-    else:
+    st.subheader("💡 Market Analysis")
+    if not df.empty:
+        st.write(f"**Strategy Confluence:** {result['votes']}")
+        st.write(f"**Stop Loss:** `{result['sl']:.5f}` | **Take Profit:** `{result['tp']:.5f}`")
+        st.markdown("---")
         view = df.tail(4).copy()
         view.index = view.index.strftime('%d %b %I:%M %p')
         st.dataframe(view, use_container_width=True)
 
 st.divider()
 
-st.subheader("📋 Bot Trade Journal & History (IST Time)")
-try:
-    logs = pd.read_sql_query(
-        "SELECT created_at_ist, symbol, timeframe, status, bias, entry_price, stop_loss, take_profit, exit_price, pnl, strategy_votes FROM auto_trade_journal ORDER BY id DESC LIMIT 50",
-        con,
-    )
-    if logs.empty:
-        st.info("Abhi koi trade execute nahi hua hai.")
-    else:
-        logs.columns = ['Time', 'Pair', 'TF', 'Status', 'Bias', 'Entry', 'SL', 'TP', 'Exit Price', 'PnL (Pips)', 'Votes Info']
-        st.dataframe(logs, use_container_width=True)
-except Exception:
-    st.info("Journal update ho rahi hai.")
+st.subheader("📋 Active & Closed Trades (Individual Close Option)")
+
+# Fetch all trades for interactive closing
+trades_df = pd.read_sql_query(
+    "SELECT id, created_at_ist, symbol, timeframe, status, bias, entry_price, stop_loss, take_profit, exit_price, pnl FROM auto_trade_journal ORDER BY id DESC LIMIT 50",
+    con,
+)
+
+if trades_df.empty:
+    st.write("Abhi koi trade record nahi hai.")
+else:
+    for index, row in trades_df.iterrows():
+        cols = st.columns([1.2, 1, 1, 1, 1, 1, 1])
+        cols[0].write(f"ID #{row['id']} ({row['symbol']})")
+        cols[1].write(f"**{row['bias']}**")
+        cols[2].write(f"Entry: {row['entry_price']}")
+        cols[3].write(f"SL: {row['stop_loss']}")
+        cols[4].write(f"TP: {row['take_profit']}")
+        cols[5].write(f"Status: {row['status']}")
+        
+        if row['status'] == 'OPEN':
+            if cols[6].button(f"Close #{row['id']}", key=f"close_{row['id']}"):
+                current_p = float(df.close.iloc[-1]) if not df.empty else row['entry_price']
+                close_single_trade(con, row['id'], current_p, row['bias'], row['entry_price'])
+                st.rerun()
+        else:
+            cols[6].write(f"PnL: {row['pnl']}")
 
 con.close()
