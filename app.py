@@ -26,9 +26,10 @@ INTERVALS = {"15 min": ("15min", "15m"), "1 hour": ("1h", "1h"), "4 hours": ("4h
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
-    # Recreate table cleanly to match new schema
+    # Drop table to ensure clean schema alignment with IST columns
+    con.execute("DROP TABLE IF EXISTS price_action_log")
     con.execute("""
-        CREATE TABLE IF NOT EXISTS price_action_log (
+        CREATE TABLE price_action_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
