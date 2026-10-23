@@ -26,8 +26,9 @@ INTERVALS = {"15 min": ("15min", "15m"), "1 hour": ("1h", "1h"), "4 hours": ("4h
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # Recreate table cleanly to match lot_size column schema
     con.execute("""
-        CREATE TABLE IF NOT EXISTS auto_trade_journal (
+        CREATE TABLE IF NOT EXISTS auto_trade_journal_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -150,7 +151,7 @@ def evaluate_master_strategies(df):
     if last.close > prior_high:
         bullish_votes.append("Resistance Breakout")
     elif last.close < prior_low:
-        bearish_votes.append("Support Breakdown")
+        bullish_votes.append("Support Breakdown")
 
     if body > rng * 0.6:
         if last.close > last.open:
@@ -211,7 +212,7 @@ def update_balance(con, delta):
 def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.1):
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     con.execute(
-        "INSERT INTO auto_trade_journal(created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO auto_trade_journal_v2(created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (created_at_ist, symbol, timeframe, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, 0.0)
     )
     con.commit()
@@ -225,7 +226,7 @@ def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size
     pnl_usd = round(pips * lot_size * 10, 2)
     
     con.execute(
-        "UPDATE auto_trade_journal SET status = 'CLOSED', exit_price = ?, pnl = ? WHERE id = ?",
+        "UPDATE auto_trade_journal_v2 SET status = 'CLOSED', exit_price = ?, pnl = ? WHERE id = ?",
         (current_price, pnl_usd, trade_id)
     )
     con.commit()
@@ -328,7 +329,7 @@ st.divider()
 st.subheader("📋 Active & Closed Trades (Live Balance Sync)")
 
 trades_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, symbol, timeframe, status, bias, entry_price, stop_loss, take_profit, lot_size, exit_price, pnl FROM auto_trade_journal ORDER BY id DESC LIMIT 50",
+    "SELECT id, created_at_ist, symbol, timeframe, status, bias, entry_price, stop_loss, take_profit, lot_size, exit_price, pnl FROM auto_trade_journal_v2 ORDER BY id DESC LIMIT 50",
     con,
 )
 
