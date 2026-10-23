@@ -20,6 +20,7 @@ SYMBOLS = {
     "GBP/USD": {"tv": "FX:GBPUSD", "td": "GBP/USD"},
 }
 INTERVALS = {
+    "5 min": {"td": "5min", "minutes": 5},
     "15 min": {"td": "15min", "minutes": 15},
     "1 hour": {"td": "1h", "minutes": 60},
     "4 hours": {"td": "4h", "minutes": 240},
@@ -39,7 +40,7 @@ def connect_db():
             entry_price REAL,
             stop_loss REAL,
             take_profit REAL,
-            lot_size REAL DEFAULT 0.1,
+            lot_size REAL DEFAULT 0.01,
             status TEXT NOT NULL,
             bias TEXT NOT NULL,
             strategy_votes TEXT,
@@ -87,7 +88,7 @@ def get_tradingview_matched_data(symbol_label, interval_label, rows=250):
         pass
         
     try:
-        dates = pd.date_range(end=datetime.now(timezone.utc), periods=rows, freq='15min')
+        dates = pd.date_range(end=datetime.now(timezone.utc), periods=rows, freq='5min')
         import numpy as np
         base_p = 4000.0 if "XAU" in symbol_label else 1.12
         dummy_close = base_p + np.cumsum(np.random.randn(rows) * 2.0)
@@ -201,7 +202,7 @@ def update_balance(con, delta):
     con.commit()
     return new_bal
 
-def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.1):
+def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.01):
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
@@ -210,7 +211,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.1):
     )
     con.commit()
 
-def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size=0.1, reason="Manual Close", is_gold=True):
+def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size=0.01, reason="Manual Close", is_gold=True):
     if bias == "BUY":
         diff = current_price - entry_price
     else:
@@ -284,7 +285,7 @@ with st.sidebar:
     st.header("⚙️ Control Panel")
     symbol = st.selectbox("Select Asset", list(SYMBOLS.keys()), index=0)
     timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
-    lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.1, step=0.01)
+    lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.01, step=0.01)
     
     if st.button("🔄 Refresh TV Market Data", use_container_width=True):
         st.toast("Synced with TradingView price feed!", icon="🔄")
@@ -335,7 +336,7 @@ left, right = st.columns([1.8, 1])
 with left:
     st.subheader(f"📈 Live TradingView Chart ({symbol} - {timeframe})")
     tv_symbol = SYMBOLS[symbol]["tv"]
-    tv_interval = {"15 min":"15", "1 hour":"60", "4 hours":"240", "1 day":"D"}[timeframe]
+    tv_interval = {"5 min": "5", "15 min": "15", "1 hour": "60", "4 hours": "240", "1 day": "D"}[timeframe]
     html = f"""
     <div class="tradingview-widget-container" style="height:480px;width:100%">
       <div id="tradingview_chart" style="height:460px;width:100%"></div>
@@ -390,7 +391,7 @@ else:
             c1.markdown(f"🕒 **Entry Time:** `{row['created_at_ist']}`\n📍 **Entry Price:** `{row['entry_price']:{fmt}}`\n🛑 **Stop Loss:** `{row['stop_loss']:{fmt}}`")
             c2.markdown(f"🎯 **Take Profit:** `{row['take_profit']:{fmt}}`\n⚡ **Status:** `OPEN`\n📊 **Votes:** `{row['strategy_votes']}`")
             
-            if st.button(f"Close Trade #{row['id']} Now", key=f"close_open_{row['id']}"):
+            if c4_btn := st.button(f"Close Trade #{row['id']} Now", key=f"close_open_{row['id']}"):
                 current_p = float(df.close.iloc[-1]) if not df.empty else row['entry_price']
                 pnl_realized = close_single_trade(con, row['id'], current_p, row['bias'], row['entry_price'], row['lot_size'], reason="Manual Close 👤", is_gold=("XAU" in row['symbol']))
                 st.toast(f"Trade #{row['id']} closed! PnL: ${pnl_realized:+.2f}")
