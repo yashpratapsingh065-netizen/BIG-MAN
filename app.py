@@ -30,7 +30,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS auto_trade_journal_gold_v5 (
+        CREATE TABLE IF NOT EXISTS auto_trade_journal_gold_v6 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT DEFAULT '-',
@@ -45,6 +45,7 @@ def connect_db():
             bias TEXT NOT NULL,
             strategy_votes TEXT,
             exit_price REAL DEFAULT 0.0,
+            exit_reason TEXT DEFAULT '-',
             pnl REAL DEFAULT 0.0
         )
     """)
@@ -144,7 +145,7 @@ def evaluate_master_strategies(df):
     if lower_wick >= body * 1.5 and last.close > last.open:
         bullish_votes.append("Demand Wick")
     elif upper_wick >= body * 1.5 and last.close < last.open:
-        bearish_votes.append("Supply Wick")
+        bullish_votes.append("Supply Wick")
 
     if last.close > last.open and prev.close < prev.open and last.open <= prev.close and last.close >= prev.open:
         bullish_votes.append("Bullish Engulfing")
@@ -222,12 +223,12 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.1):
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
-        "INSERT INTO auto_trade_journal_gold_v5 (created_at_ist, closed_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (created_at_ist, "-", symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, 0.0)
+        "INSERT INTO auto_trade_journal_gold_v6 (created_at_ist, closed_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, exit_reason, pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (created_at_ist, "-", symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, "-", 0.0)
     )
     con.commit()
 
-def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size=0.1):
+def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size=0.1, reason="Manual Close"):
     if bias == "BUY":
         diff = current_price - entry_price
     else:
@@ -237,8 +238,8 @@ def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "UPDATE auto_trade_journal_gold_v5 SET status = 'CLOSED', closed_at_ist = ?, exit_price = ?, pnl = ? WHERE id = ?",
-        (closed_at_ist, round(current_price, 2), pnl_usd, trade_id)
+        "UPDATE auto_trade_journal_gold_v6 SET status = 'CLOSED', closed_at_ist = ?, exit_price = ?, exit_reason = ?, pnl = ? WHERE id = ?",
+        (closed_at_ist, round(current_price, 2), reason, pnl_usd, trade_id)
     )
     con.commit()
     update_balance(con, pnl_usd)
@@ -246,7 +247,7 @@ def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size
 
 def check_auto_exit_conditions(con, current_price, timeframe_label):
     cursor = con.cursor()
-    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM auto_trade_journal_gold_v5 WHERE status = 'OPEN'")
+    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM auto_trade_journal_gold_v6 WHERE status = 'OPEN'")
     open_trades = cursor.fetchall()
     
     tf_minutes = INTERVALS[timeframe_label]["minutes"]
@@ -255,40 +256,46 @@ def check_auto_exit_conditions(con, current_price, timeframe_label):
     for tid, symbol, tf, bias, entry, sl, tp, lot, entry_time_str in open_trades:
         closed = False
         exit_p = current_price
+        reason = "Manual Close"
         
-        # 1. TP / SL Price Hit Check
+        # 1. TP / SL Check
         if bias == "BUY":
             if current_price >= tp:
                 exit_p = tp
+                reason = "TP Hitter 🎯"
                 closed = True
             elif current_price <= sl:
                 exit_p = sl
+                reason = "SL Hitter 🛑"
                 closed = True
         elif bias == "SELL":
             if current_price <= tp:
                 exit_p = tp
+                reason = "TP Hitter 🎯"
                 closed = True
             elif current_price >= sl:
                 exit_p = sl
+                reason = "SL Hitter 🛑"
                 closed = True
                 
-        # 2. Exact Timeframe Expiry Check (jaise 15 min complete hone par)
+        # 2. Time Expiry Check
         if not closed and tf == timeframe_label:
             try:
                 entry_dt = datetime.strptime(entry_time_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
                 elapsed_mins = (now_utc - entry_dt).total_seconds() / 60.0
                 if elapsed_mins >= tf_minutes:
                     exit_p = current_price
+                    reason = f"Time Expired ({tf}) ⏱️"
                     closed = True
             except Exception:
                 pass
                 
         if closed:
-            close_single_trade(con, tid, exit_p, bias, entry, lot)
+            close_single_trade(con, tid, exit_p, bias, entry, lot, reason=reason)
 
 # --- STREAMLIT UI ---
 st.title("🪙 BIG MAN2 — Gold (XAUUSD) Master Bot")
-st.caption("Professional Multi-Trade Engine with Strict Time-Expiry & TP/SL Auto-Close + $500 Balance")
+st.caption("Professional Engine with Exit Reasons, Detailed Trade Inspector & $500 Balance")
 
 con = connect_db()
 
@@ -298,8 +305,8 @@ with st.sidebar:
     timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
     lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.1, step=0.01)
     
-    if st.button("🔄 Refresh Market & Auto-Close Trades", use_container_width=True):
-        st.toast("Market refreshed & checking time/TP/SL!", icon="🔄")
+    if st.button("🔄 Refresh Market & Check Trades", use_container_width=True):
+        st.toast("Market refreshed & checking rules!", icon="🔄")
     
     st.markdown("---")
     st.subheader("⚡ Execution Mode")
@@ -325,7 +332,6 @@ if not df.empty:
     result = evaluate_master_strategies(df)
     current_live_price = float(df.close.iloc[-1])
     
-    # Check Time Expiry and TP/SL automatically on refresh/interaction
     check_auto_exit_conditions(con, current_live_price, timeframe)
     
     if auto_mode:
@@ -383,10 +389,10 @@ with right:
 
 st.divider()
 
-st.subheader("📋 Active Open Trades (Strict Time & TP/SL Expiry)")
+st.subheader("📋 Active Open Trades")
 
 open_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit FROM auto_trade_journal_gold_v5 WHERE status = 'OPEN' ORDER BY id DESC",
+    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM auto_trade_journal_gold_v6 WHERE status = 'OPEN' ORDER BY id DESC",
     con,
 )
 
@@ -394,29 +400,35 @@ if open_df.empty:
     st.info("Abhi koi open trade nahi hai.")
 else:
     for index, row in open_df.iterrows():
-        with st.container(border=True):
-            c1, c2, c3, c4 = st.columns([2, 1.5, 1.5, 1])
-            c1.markdown(f"**ID #{row['id']} | {row['symbol']}**\n\n🕒 **TF:** `{row['timeframe']}` | **{row['bias']}** ({row['lot_size']} Lot)\n\n📅 `{row['created_at_ist']}`")
-            c2.markdown(f"📍 **Entry:** `{row['entry_price']:.2f}`\n🛑 **SL:** `{row['stop_loss']:.2f}`")
-            c3.markdown(f"🎯 **TP:** `{row['take_profit']:.2f}`\n⚡ **Status:** `OPEN`")
-            if c4.button(f"Close #{row['id']}", key=f"close_open_{row['id']}"):
+        with st.expander(f"📌 Trade ID #{row['id']} | {row['symbol']} ({row['bias']} - {row['lot_size']} Lot) - TF: {row['timeframe']}"):
+            c1, c2 = st.columns(2)
+            c1.markdown(f"🕒 **Entry Time:** `{row['created_at_ist']}`\n📍 **Entry Price:** `{row['entry_price']:.2f}`\n🛑 **Stop Loss:** `{row['stop_loss']:.2f}`")
+            c2.markdown(f"🎯 **Take Profit:** `{row['take_profit']:.2f}`\n⚡ **Status:** `OPEN`\n📊 **Votes:** `{row['strategy_votes']}`")
+            
+            if st.button(f"Close Trade #{row['id']} Now", key=f"close_open_{row['id']}"):
                 current_p = float(df.close.iloc[-1]) if not df.empty else row['entry_price']
-                pnl_realized = close_single_trade(con, row['id'], current_p, row['bias'], row['entry_price'], row['lot_size'])
+                pnl_realized = close_single_trade(con, row['id'], current_p, row['bias'], row['entry_price'], row['lot_size'], reason="Manual Close 👤")
                 st.toast(f"Trade #{row['id']} closed! PnL: ${pnl_realized:+.2f}")
                 st.rerun()
 
 st.divider()
 
-st.subheader("📜 Closed Trades History")
+st.subheader("📜 Closed Trades History (Click to Inspect Details)")
+
 closed_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, pnl FROM auto_trade_journal_gold_v5 WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30",
+    "SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, exit_reason, pnl, strategy_votes FROM auto_trade_journal_gold_v6 WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30",
     con,
 )
 
 if closed_df.empty:
     st.info("Abhi koi closed trade history nahi hai.")
 else:
-    closed_df.columns = ['ID', 'Entry Time', 'Exit Time', 'Pair', 'TF', 'Bias', 'Lot', 'Entry', 'Exit', 'PnL ($)']
-    st.dataframe(closed_df, use_container_width=True)
+    for index, row in closed_df.iterrows():
+        pnl_color = "🟢" if row['pnl'] >= 0 else "🔴"
+        with st.expander(f"{pnl_color} ID #{row['id']} | {row['symbol']} ({row['bias']}) | PnL: ${row['pnl']:+.2f} | Reason: {row['exit_reason']}"):
+            c1, c2 = st.columns(2)
+            c1.markdown(f"🕒 **Entry Time:** `{row['created_at_ist']}`\n🕒 **Exit Time:** `{row['closed_at_ist']}`\n⏱️ **Timeframe:** `{row['timeframe']}`\n📦 **Lot Size:** `{row['lot_size']}`")
+            c2.markdown(f"📍 **Entry Price:** `{row['entry_price']:.2f}`\n🏁 **Exit Price:** `{row['exit_price']:.2f}`\n🏷️ **Exit Reason:** `{row['exit_reason']}`\n💰 **Net PnL:** `${row['pnl']:+.2f}`")
+            st.markdown(f"📊 **Strategy Votes at Entry:** `{row['strategy_votes']}`")
 
 con.close()
