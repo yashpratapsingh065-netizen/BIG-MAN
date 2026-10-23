@@ -26,6 +26,7 @@ INTERVALS = {"15 min": ("15min", "15m"), "1 hour": ("1h", "1h"), "4 hours": ("4h
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # Recreate table cleanly to match new schema
     con.execute("""
         CREATE TABLE IF NOT EXISTS price_action_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -240,13 +241,17 @@ with right:
 st.divider()
 
 st.subheader("📋 Trade Signal History (IST Time)")
-logs = pd.read_sql_query(
-    "SELECT created_at_ist as 'Created At', symbol as 'Pair', timeframe as 'TF', candle_time_ist as 'Candle Time', close as 'Close Rate', pattern as 'Strategy Pattern', bias as 'Signal', details as 'Zone Info' FROM price_action_log ORDER BY id DESC LIMIT 50",
-    con,
-)
-if logs.empty:
-    st.info("Abhi tak koi signal save nahi hua hai. 'Scan / Generate Signal' button dabayein.")
-else:
-    st.dataframe(logs, use_container_width=True)
+try:
+    logs = pd.read_sql_query(
+        "SELECT created_at_ist, symbol, timeframe, candle_time_ist, close, pattern, bias, details FROM price_action_log ORDER BY id DESC LIMIT 50",
+        con,
+    )
+    if logs.empty:
+        st.info("Abhi tak koi signal save nahi hua hai. 'Scan / Generate Signal' button dabayein.")
+    else:
+        logs.columns = ['Created At', 'Pair', 'TF', 'Candle Time', 'Close Rate', 'Strategy Pattern', 'Signal', 'Zone Info']
+        st.dataframe(logs, use_container_width=True)
+except Exception:
+    st.info("Database table reset ho rahi hai. Ek baar 'Scan / Generate Signal' button dabayein.")
 
 con.close()
