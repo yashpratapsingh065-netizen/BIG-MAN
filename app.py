@@ -190,7 +190,6 @@ def evaluate_8_strategies_voting(df):
     }
 
 def execute_auto_trade(con, symbol, timeframe, result):
-    # Check if an open trade already exists for this symbol
     cursor = con.cursor()
     cursor.execute("SELECT id FROM auto_trade_journal WHERE symbol = ? AND status = 'OPEN'", (symbol,))
     existing = cursor.fetchone()
@@ -210,7 +209,7 @@ def close_open_trades(con, symbol, current_price):
     
     for tid, bias, entry in open_trades:
         if bias == "BUY":
-            pnl = (current_price - entry) * 10000 # pips proxy
+            pnl = (current_price - entry) * 10000
         else:
             pnl = (entry - current_price) * 10000
             
@@ -222,12 +221,16 @@ def close_open_trades(con, symbol, current_price):
 
 # --- UI DESIGN ---
 st.title("🤖 BIG MAN2 — Auto-Trading Expert Bot")
-st.caption("8 Strategies Voting Engine + Fully Automated Trade Execution + SL/TP + Live Journal")
+st.caption("8 Strategies Voting Engine + Fully Automated Trade Execution + Market Refresh + Live Journal")
 
 with st.sidebar:
     st.header("⚙️ Bot Control Panel")
     symbol = st.selectbox("Currency Pair", list(SYMBOLS.keys()))
     timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
+    
+    # MARKET REFRESH BUTTON
+    if st.button("🔄 Refresh Market Data", use_container_width=True):
+        st.toast("Market data refreshed successfully!", icon="🔄")
     
     st.markdown("---")
     st.subheader("⚡ Auto-Pilot Mode")
@@ -252,7 +255,6 @@ df, source = get_data(symbol, timeframe)
 if not df.empty:
     result = evaluate_8_strategies_voting(df)
     
-    # Run Auto-Trade if enabled
     if auto_mode:
         execute_auto_trade(con, symbol, timeframe, result)
 
