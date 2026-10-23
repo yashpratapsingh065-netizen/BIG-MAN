@@ -20,17 +20,23 @@ SYMBOLS = {
     "EUR/USD": {"tv": "FX:EURUSD", "yf": "EURUSD=X", "td": "EUR/USD"},
     "GBP/USD": {"tv": "FX:GBPUSD", "yf": "GBPUSD=X", "td": "GBP/USD"},
 }
-INTERVALS = {"15 min": ("15min", "15m"), "1 hour": ("1h", "1h"), "4 hours": ("4h", "1h"), "1 day": ("1day", "1d")}
+INTERVALS = {
+    "15 min": {"td": "15min", "yf": "15m", "minutes": 15},
+    "1 hour": {"td": "1h", "yf": "1h", "minutes": 60},
+    "4 hours": {"td": "4h", "yf": "1h", "minutes": 240},
+    "1 day": {"td": "1day", "yf": "1d", "minutes": 1440}
+}
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS auto_trade_journal_gold_v2 (
+        CREATE TABLE IF NOT EXISTS auto_trade_journal_gold_v4 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT DEFAULT '-',
             symbol TEXT NOT NULL,
             timeframe TEXT NOT NULL,
+            entry_time_utc TIMESTAMP NOT NULL,
             entry_price REAL,
             stop_loss REAL,
             take_profit REAL,
@@ -59,37 +65,39 @@ def connect_db():
 def get_data(symbol_label, interval_label, rows=250):
     info = SYMBOLS[symbol_label]
     td_key = st.secrets.get("TWELVE_DATA_API_KEY", os.getenv("TWELVE_DATA_API_KEY", ""))
-    td_interval, yf_interval = INTERVALS[interval_label]
+    cfg = INTERVALS[interval_label]
     if td_key:
         try:
             resp = requests.get(
                 "https://api.twelvedata.com/time_series",
-                params={"symbol": info["td"], "interval": td_interval, "outputsize": rows, "apikey": td_key},
+                params={"symbol": info["td"], "interval": cfg["td"], "outputsize": rows, "apikey": td_key},
                 timeout=15,
             )
             payload = resp.json()
             if "values" in payload:
                 df = pd.DataFrame(payload["values"])
-                df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True).dt.tz_convert(IST)
+                df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
+                df["datetime_ist"] = df["datetime"].dt.tz_convert(IST)
                 for c in ["open", "high", "low", "close"]:
                     df[c] = pd.to_numeric(df[c], errors="coerce")
                 df = df.dropna(subset=["datetime", "open", "high", "low", "close"])
                 df = df.sort_values("datetime").set_index("datetime")
-                return df[["open", "high", "low", "close"]].tail(rows), "Twelve Data"
+                return df[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "Twelve Data"
         except Exception:
             pass
     try:
-        period = "60d" if yf_interval in ("15m", "1h") else "2y"
-        df = yf.download(info["yf"], period=period, interval=yf_interval, progress=False, auto_adjust=False)
+        period = "60d" if cfg["yf"] in ("15m", "1h") else "2y"
+        df = yf.download(info["yf"], period=period, interval=cfg["yf"], progress=False, auto_adjust=False)
         if df is None or df.empty:
             return pd.DataFrame(), "No data"
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.columns = [str(c).lower() for c in df.columns]
         df = df[["open", "high", "low", "close"]].dropna()
-        df.index = pd.to_datetime(df.index, utc=True).tz_convert(IST)
+        df.index = pd.to_datetime(df.index, utc=True)
+        df["datetime_ist"] = df.index.tz_convert(IST)
         if interval_label == "4 hours":
-            df = df.resample("4h").agg({"open":"first", "high":"max", "low":"min", "close":"last"}).dropna()
+            df = df.resample("4h").agg({"open":"first", "high":"max", "low":"min", "close":"last", "datetime_ist":"last"}).dropna()
         return df.tail(rows), "Yahoo Finance fallback"
     except Exception:
         return pd.DataFrame(), "No data"
@@ -125,7 +133,7 @@ def evaluate_master_strategies(df):
     if last.close < eq_50:
         bullish_votes.append("Discount Zone")
     else:
-        bearish_votes.append("Premium Zone")
+        bullish_votes.append("Premium Zone")
 
     if abs(last.close - ote_618) <= (diff * 0.05):
         if last.close > ote_618:
@@ -212,9 +220,10 @@ def update_balance(con, delta):
 
 def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.1):
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
+    entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
-        "INSERT INTO auto_trade_journal_gold_v2(created_at_ist, closed_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (created_at_ist, "-", symbol, timeframe, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, 0.0)
+        "INSERT INTO auto_trade_journal_gold_v4 (created_at_ist, closed_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (created_at_ist, "-", symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, 0.0)
     )
     con.commit()
 
@@ -228,19 +237,60 @@ def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "UPDATE auto_trade_journal_gold_v2 SET status = 'CLOSED', closed_at_ist = ?, exit_price = ?, pnl = ? WHERE id = ?",
+        "UPDATE auto_trade_journal_gold_v4 SET status = 'CLOSED', closed_at_ist = ?, exit_price = ?, pnl = ? WHERE id = ?",
         (closed_at_ist, round(current_price, 2), pnl_usd, trade_id)
     )
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
+def check_auto_exit_conditions(con, current_price, current_df_index, timeframe_label):
+    cursor = con.cursor()
+    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM auto_trade_journal_gold_v4 WHERE status = 'OPEN'")
+    open_trades = cursor.fetchall()
+    
+    tf_minutes = INTERVALS[timeframe_label]["minutes"]
+    now_utc = datetime.now(timezone.utc)
+    
+    for tid, symbol, tf, bias, entry, sl, tp, lot, entry_time_str in open_trades:
+        closed = False
+        exit_p = current_price
+        
+        # 1. TP / SL Price Hit Check
+        if bias == "BUY":
+            if current_price >= tp:
+                exit_p = tp
+                closed = True
+            elif current_price <= sl:
+                exit_p = sl
+                closed = True
+        elif bias == "SELL":
+            if current_price <= tp:
+                exit_p = tp
+                closed = True
+            elif current_price >= sl:
+                exit_p = sl
+                closed = True
+                
+        # 2. Time-based Expiry Check (e.g. 15 min complete hone par auto close)
+        if not closed and tf == timeframe_label:
+            try:
+                entry_dt = datetime.strptime(entry_time_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                elapsed_mins = (now_utc - entry_dt).total_seconds() / 60.0
+                if elapsed_mins >= tf_minutes:
+                    exit_p = current_price
+                    closed = True
+            except Exception:
+                pass
+                
+        if closed:
+            close_single_trade(con, tid, exit_p, bias, entry, lot)
+
 # --- STREAMLIT UI ---
 st.title("🪙 BIG MAN2 — Gold (XAUUSD) Master Bot")
-st.caption("Professional Multi-Trade Execution Engine with Timeframe tracking & $500 Demo Balance")
+st.caption("Professional Multi-Trade Engine with Time-Expiry & Auto TP/SL Close + $500 Balance")
 
 con = connect_db()
-curr_balance = get_current_balance(con)
 
 with st.sidebar:
     st.header("⚙️ Control Panel")
@@ -248,8 +298,8 @@ with st.sidebar:
     timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
     lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.1, step=0.01)
     
-    if st.button("🔄 Refresh Market Data", use_container_width=True):
-        st.toast("Market refreshed!", icon="🔄")
+    if st.button("🔄 Refresh Market Data & Check Trades", use_container_width=True):
+        st.toast("Market refreshed & checking time/TP/SL!", icon="🔄")
     
     st.markdown("---")
     st.subheader("⚡ Execution Mode")
@@ -273,15 +323,20 @@ df, source = get_data(symbol, timeframe)
 
 if not df.empty:
     result = evaluate_master_strategies(df)
+    current_live_price = float(df.close.iloc[-1])
+    
+    # Check Auto TP/SL and Time Expiry on every refresh/interaction
+    check_auto_exit_conditions(con, current_live_price, df.index[-1], timeframe)
     
     if auto_mode:
         execute_auto_trade(con, symbol, timeframe, result, lot_size=lot_input)
 
+    curr_balance = get_current_balance(con)
     bal_color = "🟢" if curr_balance >= 500 else "🔴"
     st.markdown(f"### 💵 Account Balance: **${curr_balance:,.2f} USD** {bal_color}")
     
     col1, col2, col3 = st.columns(3)
-    col1.metric("Live Gold Rate", f"{result['entry']:.2f}")
+    col1.metric("Live Gold Rate", f"{current_live_price:.2f}")
     col2.metric("Signal Bias", result["bias"])
     col3.metric("Strategy Votes", f"Bull: {result['bullish']} | Bear: {result['bearish']}")
 
@@ -328,10 +383,10 @@ with right:
 
 st.divider()
 
-st.subheader("📋 Active Open Trades (With Timeframe)")
+st.subheader("📋 Active Open Trades (Time & TP/SL Monitor)")
 
 open_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit FROM auto_trade_journal_gold_v2 WHERE status = 'OPEN' ORDER BY id DESC",
+    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit FROM auto_trade_journal_gold_v4 WHERE status = 'OPEN' ORDER BY id DESC",
     con,
 )
 
@@ -352,9 +407,9 @@ else:
 
 st.divider()
 
-st.subheader("📜 Closed Trades History (With Timeframe)")
+st.subheader("📜 Closed Trades History")
 closed_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, pnl FROM auto_trade_journal_gold_v2 WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30",
+    "SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, pnl FROM auto_trade_journal_gold_v4 WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30",
     con,
 )
 
