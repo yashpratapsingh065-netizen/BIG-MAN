@@ -97,7 +97,6 @@ def analyze_price_action(df):
     prior_high = float(recent.high.max())
     prior_low = float(recent.low.min())
     
-    # Premium & Discount Zone calculation
     swing_high = float(df.high.tail(50).max())
     swing_low = float(df.low.tail(50).min())
     eq_level = (swing_high + swing_low) / 2.0
@@ -106,7 +105,6 @@ def analyze_price_action(df):
     patterns = []
     bias = "WAIT"
 
-    # 1. SMC Fair Value Gap (FVG) Strategy
     if last.low > p_prev.high and prev.close > prev.open:
         if last.close < eq_level:
             patterns.append("Bullish FVG (SMC Buy Signal)")
@@ -121,7 +119,6 @@ def analyze_price_action(df):
         else:
             patterns.append("Bearish FVG (Discount Zone)")
 
-    # 2. Engulfing Patterns
     if last.close > last.open and prev.close < prev.open and last.open <= prev.close and last.close >= prev.open:
         patterns.append("Bullish Engulfing")
         if bias == "WAIT": bias = "BUY"
@@ -129,7 +126,6 @@ def analyze_price_action(df):
         patterns.append("Bearish Engulfing")
         if bias == "WAIT": bias = "SELL"
 
-    # 3. Pin Bar / Rejection Wick
     if lower_wick >= body * 2 and lower_wick >= rng * 0.45 and last.close > last.open:
         patterns.append("Bullish Pin Bar / Rejection")
         if bias == "WAIT": bias = "BUY"
@@ -137,7 +133,6 @@ def analyze_price_action(df):
         patterns.append("Bearish Pin Bar / Rejection")
         if bias == "WAIT": bias = "SELL"
 
-    # 4. Breakout
     if last.close > prior_high:
         patterns.append("High Breakout")
         if bias == "WAIT": bias = "BUY"
@@ -181,7 +176,6 @@ with st.sidebar:
 con = connect_db()
 df, source = get_data(symbol, timeframe)
 
-# Top Bar Metrics
 if not df.empty:
     result = analyze_price_action(df)
     col1, col2, col3 = st.columns(3)
@@ -194,11 +188,10 @@ if not df.empty:
     else:
         col2.warning("🟡 WAIT (No Clear Trade)")
         
-    col3.info(f"<b>Detected Strategy:</b><br>{result['pattern']}", unsafe_allow_html=True)
+    col3.markdown(f"**Detected Strategy:**\n{result['pattern']}")
 
 st.divider()
 
-# Left & Right Columns
 left, right = st.columns([1.8, 1])
 
 with left:
@@ -235,7 +228,7 @@ with right:
     else:
         st.write(result["details"])
         st.markdown("---")
-        st.write("<b>Recent Candles (IST Time):</b>", unsafe_allow_html=True)
+        st.write("**Recent Candles (IST Time):**")
         view = df.tail(6).copy()
         view.index = view.index.strftime('%d %b %I:%M %p')
         st.dataframe(view, use_container_width=True)
@@ -246,7 +239,6 @@ with right:
 
 st.divider()
 
-# History Table
 st.subheader("📋 Trade Signal History (IST Time)")
 logs = pd.read_sql_query(
     "SELECT created_at_ist as 'Created At', symbol as 'Pair', timeframe as 'TF', candle_time_ist as 'Candle Time', close as 'Close Rate', pattern as 'Strategy Pattern', bias as 'Signal', details as 'Zone Info' FROM price_action_log ORDER BY id DESC LIMIT 50",
