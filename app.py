@@ -26,11 +26,11 @@ INTERVALS = {"15 min": ("15min", "15m"), "1 hour": ("1h", "1h"), "4 hours": ("4h
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
-    # Recreate table cleanly to match lot_size column schema
     con.execute("""
-        CREATE TABLE IF NOT EXISTS auto_trade_journal_v2 (
+        CREATE TABLE IF NOT EXISTS auto_trade_journal_v3 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
+            closed_at_ist TEXT DEFAULT '-',
             symbol TEXT NOT NULL,
             timeframe TEXT NOT NULL,
             entry_price REAL,
@@ -40,8 +40,8 @@ def connect_db():
             status TEXT NOT NULL,
             bias TEXT NOT NULL,
             strategy_votes TEXT,
-            exit_price REAL,
-            pnl REAL
+            exit_price REAL DEFAULT 0.0,
+            pnl REAL DEFAULT 0.0
         )
     """)
     con.execute("""
@@ -191,9 +191,9 @@ def evaluate_master_strategies(df):
         "votes": all_votes_str,
         "bullish": b_score,
         "bearish": s_score,
-        "entry": current_close,
-        "sl": sl,
-        "tp": tp
+        "entry": round(current_close, 5),
+        "sl": round(sl, 5),
+        "tp": round(tp, 5)
     }
 
 def get_current_balance(con):
@@ -212,8 +212,8 @@ def update_balance(con, delta):
 def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.1):
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     con.execute(
-        "INSERT INTO auto_trade_journal_v2(created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (created_at_ist, symbol, timeframe, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, 0.0)
+        "INSERT INTO auto_trade_journal_v3(created_at_ist, closed_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (created_at_ist, "-", symbol, timeframe, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, 0.0)
     )
     con.commit()
 
@@ -224,10 +224,11 @@ def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size
         pips = (entry_price - current_price) * 10000
         
     pnl_usd = round(pips * lot_size * 10, 2)
+    closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "UPDATE auto_trade_journal_v2 SET status = 'CLOSED', exit_price = ?, pnl = ? WHERE id = ?",
-        (current_price, pnl_usd, trade_id)
+        "UPDATE auto_trade_journal_v3 SET status = 'CLOSED', closed_at_ist = ?, exit_price = ?, pnl = ? WHERE id = ?",
+        (closed_at_ist, round(current_price, 5), pnl_usd, trade_id)
     )
     con.commit()
     update_balance(con, pnl_usd)
@@ -326,33 +327,40 @@ with right:
 
 st.divider()
 
-st.subheader("📋 Active & Closed Trades (Live Balance Sync)")
+st.subheader("📋 Active Open Trades")
 
-trades_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, symbol, timeframe, status, bias, entry_price, stop_loss, take_profit, lot_size, exit_price, pnl FROM auto_trade_journal_v2 ORDER BY id DESC LIMIT 50",
+open_df = pd.read_sql_query(
+    "SELECT id, created_at_ist, symbol, bias, lot_size, entry_price, stop_loss, take_profit FROM auto_trade_journal_v3 WHERE status = 'OPEN' ORDER BY id DESC",
     con,
 )
 
-if trades_df.empty:
-    st.write("Abhi koi trade record nahi hai.")
+if open_df.empty:
+    st.info("Abhi koi open trade nahi hai.")
 else:
-    for index, row in trades_df.iterrows():
-        cols = st.columns([1.2, 1, 1, 1, 1, 1, 1])
-        cols[0].write(f"ID #{row['id']} ({row['symbol']})")
-        cols[1].write(f"**{row['bias']}** ({row['lot_size']} Lot)")
-        cols[2].write(f"Entry: {row['entry_price']}")
-        cols[3].write(f"SL: {row['stop_loss']}")
-        cols[4].write(f"TP: {row['take_profit']}")
-        cols[5].write(f"Status: {row['status']}")
-        
-        if row['status'] == 'OPEN':
-            if cols[6].button(f"Close #{row['id']}", key=f"close_{row['id']}"):
+    for index, row in open_df.iterrows():
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([2, 1.5, 1.5, 1])
+            c1.markdown(f"**ID #{row['id']} | {row['symbol']}** ({row['bias']} - {row['lot_size']} Lot)\n\n🕒 Entry Time: `{row['created_at_ist']}`")
+            c2.markdown(f"📍 **Entry:** `{row['entry_price']:.5f}`\n🛑 **SL:** `{row['stop_loss']:.5f}`")
+            c3.markdown(f"🎯 **TP:** `{row['take_profit']:.5f}`\n⚡ **Status:** `OPEN`")
+            if c4.button(f"Close #{row['id']}", key=f"close_open_{row['id']}"):
                 current_p = float(df.close.iloc[-1]) if not df.empty else row['entry_price']
                 pnl_realized = close_single_trade(con, row['id'], current_p, row['bias'], row['entry_price'], row['lot_size'])
                 st.toast(f"Trade #{row['id']} closed! PnL: ${pnl_realized:+.2f}")
                 st.rerun()
-        else:
-            pnl_val = row['pnl'] if row['pnl'] is not None else 0.0
-            cols[6].write(f"PnL: **${pnl_val:+.2f}**")
+
+st.divider()
+
+st.subheader("📜 Closed Trades History")
+closed_df = pd.read_sql_query(
+    "SELECT id, created_at_ist, closed_at_ist, symbol, bias, lot_size, entry_price, exit_price, pnl FROM auto_trade_journal_v3 WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30",
+    con,
+)
+
+if closed_df.empty:
+    st.info("Abhi koi closed trade history nahi hai.")
+else:
+    closed_df.columns = ['ID', 'Entry Time', 'Exit Time', 'Pair', 'Bias', 'Lot', 'Entry', 'Exit', 'PnL ($)']
+    st.dataframe(closed_df, use_container_width=True)
 
 con.close()
