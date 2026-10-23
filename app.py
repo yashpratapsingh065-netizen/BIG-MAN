@@ -35,6 +35,7 @@ def connect_db():
             entry_price REAL,
             stop_loss REAL,
             take_profit REAL,
+            lot_size REAL DEFAULT 0.1,
             status TEXT NOT NULL,
             bias TEXT NOT NULL,
             strategy_votes TEXT,
@@ -42,6 +43,17 @@ def connect_db():
             pnl REAL
         )
     """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS account_balance (
+            id INTEGER PRIMARY KEY,
+            balance REAL NOT NULL
+        )
+    """)
+    cursor = con.cursor()
+    cursor.execute("SELECT balance FROM account_balance WHERE id = 1")
+    row = cursor.fetchone()
+    if not row:
+        con.execute("INSERT INTO account_balance (id, balance) VALUES (1, 500.0)")
     con.commit()
     return con
 
@@ -183,35 +195,55 @@ def evaluate_master_strategies(df):
         "tp": tp
     }
 
-def execute_auto_trade(con, symbol, timeframe, result):
-    # Multiple trades allow karne ke liye existing check hata diya hai
+def get_current_balance(con):
+    cursor = con.cursor()
+    cursor.execute("SELECT balance FROM account_balance WHERE id = 1")
+    row = cursor.fetchone()
+    return float(row[0]) if row else 500.0
+
+def update_balance(con, delta):
+    current = get_current_balance(con)
+    new_bal = current + delta
+    con.execute("UPDATE account_balance SET balance = ? WHERE id = 1", (new_bal,))
+    con.commit()
+    return new_bal
+
+def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.1):
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     con.execute(
-        "INSERT INTO auto_trade_journal(created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (created_at_ist, symbol, timeframe, result["entry"], result["sl"], result["tp"], "OPEN", result["bias"], result["votes"], 0.0, 0.0)
+        "INSERT INTO auto_trade_journal(created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, pnl) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (created_at_ist, symbol, timeframe, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, 0.0)
     )
     con.commit()
 
-def close_single_trade(con, trade_id, current_price, bias, entry_price):
+def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size=0.1):
     if bias == "BUY":
-        pnl = (current_price - entry_price) * 10000
+        pips = (current_price - entry_price) * 10000
     else:
-        pnl = (entry_price - current_price) * 10000
+        pips = (entry_price - current_price) * 10000
         
+    pnl_usd = round(pips * lot_size * 10, 2)
+    
     con.execute(
         "UPDATE auto_trade_journal SET status = 'CLOSED', exit_price = ?, pnl = ? WHERE id = ?",
-        (current_price, round(pnl, 2), trade_id)
+        (current_price, pnl_usd, trade_id)
     )
     con.commit()
+    update_balance(con, pnl_usd)
+    return pnl_usd
 
 # --- STREAMLIT UI ---
 st.title("📈 BIG MAN2 — Master Trading Bot")
-st.caption("Professional Multi-Trade Execution & Strategy Engine")
+st.caption("Professional Multi-Trade Execution Engine with $500 Demo Balance")
+
+con = connect_db()
+curr_balance = get_current_balance(con)
 
 with st.sidebar:
     st.header("⚙️ Control Panel")
     symbol = st.selectbox("Currency Pair", list(SYMBOLS.keys()))
     timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
+    lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.1, step=0.01)
     
     if st.button("🔄 Refresh Market Data", use_container_width=True):
         st.toast("Market refreshed!", icon="🔄")
@@ -220,27 +252,33 @@ with st.sidebar:
     st.subheader("⚡ Execution Mode")
     auto_mode = st.toggle("Enable Auto-Pilot", value=False)
     
-    # Manual Trade Trigger button
     if st.button("➕ Open New Trade Now", use_container_width=True):
-        con_temp = connect_db()
         df_temp, _ = get_data(symbol, timeframe)
         if not df_temp.empty:
             res_temp = evaluate_master_strategies(df_temp)
-            execute_auto_trade(con_temp, symbol, timeframe, res_temp)
-            st.sidebar.success("New trade opened successfully!")
-        con_temp.close()
+            execute_auto_trade(con, symbol, timeframe, res_temp, lot_size=lot_input)
+            st.sidebar.success("New trade opened!")
 
-con = connect_db()
+    st.markdown("---")
+    if st.button("🔄 Reset Demo Balance ($500)", use_container_width=True):
+        con.execute("UPDATE account_balance SET balance = 500.0 WHERE id = 1")
+        con.commit()
+        st.sidebar.success("Balance reset to $500.00!")
+        st.rerun()
+
 df, source = get_data(symbol, timeframe)
 
 if not df.empty:
     result = evaluate_master_strategies(df)
     
     if auto_mode:
-        execute_auto_trade(con, symbol, timeframe, result)
+        execute_auto_trade(con, symbol, timeframe, result, lot_size=lot_input)
 
+    bal_color = "🟢" if curr_balance >= 500 else "🔴"
+    st.markdown(f"### 💵 Account Balance: **${curr_balance:,.2f} USD** {bal_color}")
+    
     col1, col2, col3 = st.columns(3)
-    col1.metric("Live Price", f"{result['entry']:.5f}")
+    col1.metric("Live Market Rate", f"{result['entry']:.5f}")
     col2.metric("Signal Bias", result["bias"])
     col3.metric("Strategy Votes", f"Bull: {result['bullish']} | Bear: {result['bearish']}")
 
@@ -287,11 +325,10 @@ with right:
 
 st.divider()
 
-st.subheader("📋 Active & Closed Trades (Individual Close Option)")
+st.subheader("📋 Active & Closed Trades (Live Balance Sync)")
 
-# Fetch all trades for interactive closing
 trades_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, symbol, timeframe, status, bias, entry_price, stop_loss, take_profit, exit_price, pnl FROM auto_trade_journal ORDER BY id DESC LIMIT 50",
+    "SELECT id, created_at_ist, symbol, timeframe, status, bias, entry_price, stop_loss, take_profit, lot_size, exit_price, pnl FROM auto_trade_journal ORDER BY id DESC LIMIT 50",
     con,
 )
 
@@ -301,7 +338,7 @@ else:
     for index, row in trades_df.iterrows():
         cols = st.columns([1.2, 1, 1, 1, 1, 1, 1])
         cols[0].write(f"ID #{row['id']} ({row['symbol']})")
-        cols[1].write(f"**{row['bias']}**")
+        cols[1].write(f"**{row['bias']}** ({row['lot_size']} Lot)")
         cols[2].write(f"Entry: {row['entry_price']}")
         cols[3].write(f"SL: {row['stop_loss']}")
         cols[4].write(f"TP: {row['take_profit']}")
@@ -310,9 +347,11 @@ else:
         if row['status'] == 'OPEN':
             if cols[6].button(f"Close #{row['id']}", key=f"close_{row['id']}"):
                 current_p = float(df.close.iloc[-1]) if not df.empty else row['entry_price']
-                close_single_trade(con, row['id'], current_p, row['bias'], row['entry_price'])
+                pnl_realized = close_single_trade(con, row['id'], current_p, row['bias'], row['entry_price'], row['lot_size'])
+                st.toast(f"Trade #{row['id']} closed! PnL: ${pnl_realized:+.2f}")
                 st.rerun()
         else:
-            cols[6].write(f"PnL: {row['pnl']}")
+            pnl_val = row['pnl'] if row['pnl'] is not None else 0.0
+            cols[6].write(f"PnL: **${pnl_val:+.2f}**")
 
 con.close()
