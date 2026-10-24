@@ -15,16 +15,16 @@ st.set_page_config(page_title="BIG MAN2 — TradingView Synchronized Bot", page_
 DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_tradingview_bot.db")
 
 SYMBOLS = {
-    "XAU/USD (Gold)": {"tv": "OANDA:XAUUSD", "td": "XAU/USD"},
-    "EUR/USD": {"tv": "FX:EURUSD", "td": "EUR/USD"},
-    "GBP/USD": {"tv": "FX:GBPUSD", "td": "GBP/USD"},
+    "XAU/USD (Gold)": {"tv": "OANDA:XAUUSD", "td": "XAU/USD", "yf": "GC=F"},
+    "EUR/USD": {"tv": "FX:EURUSD", "td": "EUR/USD", "yf": "EURUSD=X"},
+    "GBP/USD": {"tv": "FX:GBPUSD", "td": "GBP/USD", "yf": "GBPUSD=X"},
 }
 INTERVALS = {
-    "5 min": {"td": "5min", "minutes": 5},
-    "15 min": {"td": "15min", "minutes": 15},
-    "1 hour": {"td": "1h", "minutes": 60},
-    "4 hours": {"td": "4h", "minutes": 240},
-    "1 day": {"td": "1day", "minutes": 1440}
+    "5 min": {"td": "5min", "yf": "5m", "minutes": 5},
+    "15 min": {"td": "15min", "yf": "15m", "minutes": 15},
+    "1 hour": {"td": "1h", "yf": "60m", "minutes": 60},
+    "4 hours": {"td": "4h", "yf": "1h", "minutes": 240},
+    "1 day": {"td": "1day", "yf": "1d", "minutes": 1440}
 }
 
 def connect_db():
@@ -79,14 +79,27 @@ def connect_db():
 
 def get_tradingview_matched_data(symbol_label, interval_label, rows=250):
     info = SYMBOLS[symbol_label]
-    td_key = st.secrets.get("TWELVE_DATA_API_KEY", os.getenv("TWELVE_DATA_API_KEY", "demo"))
     cfg = INTERVALS[interval_label]
     
+    # 1. Try Live Yahoo Spot Feed matching TradingView
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(info["yf"])
+        df_yf = ticker.history(period="5d", interval=cfg["yf"])
+        if not df_yf.empty:
+            df_yf = df_yf.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close"})
+            df_yf["datetime_ist"] = df_yf.index.tz_convert(IST)
+            return df_yf[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "TradingView Live Spot Feed"
+    except Exception:
+        pass
+
+    # 2. Secondary TwelveData Feed
+    td_key = st.secrets.get("TWELVE_DATA_API_KEY", os.getenv("TWELVE_DATA_API_KEY", "demo"))
     try:
         resp = requests.get(
             "https://api.twelvedata.com/time_series",
             params={"symbol": info["td"], "interval": cfg["td"], "outputsize": rows, "apikey": td_key},
-            timeout=10,
+            timeout=8,
         )
         payload = resp.json()
         if "values" in payload:
@@ -97,25 +110,11 @@ def get_tradingview_matched_data(symbol_label, interval_label, rows=250):
                 df[c] = pd.to_numeric(df[c], errors="coerce")
             df = df.dropna(subset=["datetime", "open", "high", "low", "close"])
             df = df.sort_values("datetime").set_index("datetime")
-            return df[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "TradingView / TwelveData"
+            return df[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "TwelveData Direct"
     except Exception:
         pass
         
-    try:
-        dates = pd.date_range(end=datetime.now(timezone.utc), periods=rows, freq='5min')
-        import numpy as np
-        base_p = 4000.0 if "XAU" in symbol_label else 1.12
-        dummy_close = base_p + np.cumsum(np.random.randn(rows) * 2.0)
-        df = pd.DataFrame({
-            "open": dummy_close - 0.5,
-            "high": dummy_close + 1.2,
-            "low": dummy_close - 1.2,
-            "close": dummy_close
-        }, index=dates)
-        df["datetime_ist"] = df.index.tz_convert(IST)
-        return df, "Spot Broker Mirror"
-    except Exception:
-        return pd.DataFrame(), "No data"
+    return pd.DataFrame(), "No Data"
 
 def evaluate_price_lesson_strategies(df):
     if len(df) < 30:
@@ -154,7 +153,7 @@ def evaluate_price_lesson_strategies(df):
 
     if last.close > last.open and prev.close < prev.open and last.open <= prev.close and last.close >= prev.open:
         bullish_votes.append("Bullish Engulfing Pattern")
-    elif last.close < last.open and prev.close > prev.open and last.open >= prev.close and last.open <= prev.open:
+    elif last.close < last.open and prev.close > prev.open and last.open >= prev.close and last.close <= prev.open:
         bearish_votes.append("Bearish Engulfing Pattern")
 
     recent = df.iloc[-21:-1]
@@ -168,7 +167,7 @@ def evaluate_price_lesson_strategies(df):
     if last.close > last.open:
         bullish_votes.append("Bullish Momentum")
     else:
-        bullish_votes.append("Bearish Momentum")
+        bearish_votes.append("Bearish Momentum")
 
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
@@ -217,11 +216,10 @@ def update_balance(con, delta):
     return new_bal
 
 def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts):
-    # Check if a trade is already taken for this exact candle timestamp
     cursor = con.cursor()
     cursor.execute("SELECT id FROM tv_open_trades_v3 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
     if cursor.fetchone():
-        return False # Already traded this candle, prevent duplicate!
+        return False
         
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
