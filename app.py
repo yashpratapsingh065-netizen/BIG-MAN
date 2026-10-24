@@ -29,11 +29,11 @@ INTERVALS = {
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # Active Open Trades Table
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_master_trades_v1 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
-            closed_at_ist TEXT DEFAULT '-',
             symbol TEXT NOT NULL,
             timeframe TEXT NOT NULL,
             entry_time_utc TIMESTAMP NOT NULL,
@@ -41,12 +41,27 @@ def connect_db():
             stop_loss REAL,
             take_profit REAL,
             lot_size REAL DEFAULT 0.01,
-            status TEXT NOT NULL,
             bias TEXT NOT NULL,
-            strategy_votes TEXT,
-            exit_price REAL DEFAULT 0.0,
-            exit_reason TEXT DEFAULT '-',
-            pnl REAL DEFAULT 0.0
+            strategy_votes TEXT
+        )
+    """)
+    # Permanent Trade History Table (Never Deleted)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS trade_history (
+            id INTEGER PRIMARY KEY,
+            created_at_ist TEXT NOT NULL,
+            closed_at_ist TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            entry_price REAL,
+            exit_price REAL,
+            stop_loss REAL,
+            take_profit REAL,
+            lot_size REAL,
+            bias TEXT NOT NULL,
+            exit_reason TEXT NOT NULL,
+            pnl REAL NOT NULL,
+            strategy_votes TEXT
         )
     """)
     con.execute("""
@@ -206,12 +221,20 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.01):
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
-        "INSERT INTO tv_master_trades_v1 (created_at_ist, closed_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, status, bias, strategy_votes, exit_price, exit_reason, pnl) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (created_at_ist, "-", symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, "OPEN", result["bias"], result["votes"], 0.0, "-", 0.0)
+        "INSERT INTO tv_open_trades_v2 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"])
     )
     con.commit()
 
-def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size=0.01, reason="Manual Close", is_gold=True):
+def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manual Close 👤"):
+    cursor = con.cursor()
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v2 WHERE id = ?", (trade_id,))
+    row = cursor.fetchone()
+    if not row:
+        return 0.0
+    
+    created_at_ist, symbol, timeframe, entry_price, sl, tp, lot_size, bias, strategy_votes = row
+    
     if bias == "BUY":
         diff = current_price - entry_price
     else:
@@ -221,17 +244,20 @@ def close_single_trade(con, trade_id, current_price, bias, entry_price, lot_size
     pnl_usd = round(diff * lot_size * multiplier, 2)
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
+    # Save to Permanent Trade History Table
     con.execute(
-        "UPDATE tv_master_trades_v1 SET status = 'CLOSED', closed_at_ist = ?, exit_price = ?, exit_reason = ?, pnl = ? WHERE id = ?",
-        (closed_at_ist, round(current_price, 2 if is_gold else 5), reason, pnl_usd, trade_id)
+        "INSERT INTO trade_history (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, 2 if is_gold else 5), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
+    # Remove from Open Trades Table
+    con.execute("DELETE FROM tv_open_trades_v2 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
 def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True):
     cursor = con.cursor()
-    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_master_trades_v1 WHERE status = 'OPEN'")
+    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_open_trades_v2")
     open_trades = cursor.fetchall()
     
     tf_minutes = INTERVALS[timeframe_label]["minutes"]
@@ -240,7 +266,7 @@ def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True
     for tid, symbol, tf, bias, entry, sl, tp, lot, entry_time_str in open_trades:
         closed = False
         exit_p = current_price
-        reason = "Manual Close"
+        reason = "Manual Close 👤"
         
         if bias == "BUY":
             if current_price >= tp:
@@ -273,11 +299,11 @@ def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True
                 pass
                 
         if closed:
-            close_single_trade(con, tid, exit_p, bias, entry, lot, reason=reason, is_gold=is_gold)
+            close_single_trade(con, tid, exit_p, is_gold=is_gold, reason=reason)
 
 # --- STREAMLIT UI ---
 st.title("🪙 BIG MAN2 — TradingView Synchronized Bot")
-st.caption("Exact TradingView Broker Feed, Price Lesson Strategies & $500 Demo Balance")
+st.caption("Exact TradingView Broker Feed, Price Lesson Strategies & Permanent Trade History")
 
 con = connect_db()
 
@@ -374,10 +400,10 @@ with right:
 
 st.divider()
 
-st.subheader("📋 Active Open Trades (TradingView Matched)")
+st.subheader("📋 Active Open Trades")
 
 open_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_master_trades_v1 WHERE status = 'OPEN' ORDER BY id DESC",
+    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v2 ORDER BY id DESC",
     con,
 )
 
@@ -391,25 +417,25 @@ else:
             c1.markdown(f"🕒 **Entry Time:** `{row['created_at_ist']}`\n📍 **Entry Price:** `{row['entry_price']:{fmt}}`\n🛑 **Stop Loss:** `{row['stop_loss']:{fmt}}`")
             c2.markdown(f"🎯 **Take Profit:** `{row['take_profit']:{fmt}}`\n⚡ **Status:** `OPEN`\n📊 **Votes:** `{row['strategy_votes']}`")
             
-            if c4_btn := st.button(f"Close Trade #{row['id']} Now", key=f"close_open_{row['id']}"):
+            if st.button(f"Close Trade #{row['id']} Now", key=f"close_open_{row['id']}"):
                 current_p = float(df.close.iloc[-1]) if not df.empty else row['entry_price']
-                pnl_realized = close_single_trade(con, row['id'], current_p, row['bias'], row['entry_price'], row['lot_size'], reason="Manual Close 👤", is_gold=("XAU" in row['symbol']))
+                pnl_realized = close_single_trade(con, row['id'], current_p, is_gold=("XAU" in row['symbol']), reason="Manual Close 👤")
                 st.toast(f"Trade #{row['id']} closed! PnL: ${pnl_realized:+.2f}")
                 st.rerun()
 
 st.divider()
 
-st.subheader("📜 Closed Trades History")
+st.subheader("📜 Trade History (Permanent Storage)")
 
-closed_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, exit_reason, pnl, strategy_votes FROM tv_master_trades_v1 WHERE status = 'CLOSED' ORDER BY id DESC LIMIT 30",
+history_df = pd.read_sql_query(
+    "SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, exit_reason, pnl, strategy_votes FROM trade_history ORDER BY id DESC LIMIT 50",
     con,
 )
 
-if closed_df.empty:
-    st.info("Abhi koi closed trade history nahi hai.")
+if history_df.empty:
+    st.info("Abhi tak koi trade history me saved nahi hai.")
 else:
-    for index, row in closed_df.iterrows():
+    for index, row in history_df.iterrows():
         pnl_color = "🟢" if row['pnl'] >= 0 else "🔴"
         fmt = ".2f" if "XAU" in row['symbol'] else ".5f"
         with st.expander(f"{pnl_color} ID #{row['id']} | {row['symbol']} ({row['bias']}) | PnL: ${row['pnl']:+.2f} | Reason: {row['exit_reason']}"):
