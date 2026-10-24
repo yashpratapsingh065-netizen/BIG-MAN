@@ -29,9 +29,8 @@ INTERVALS = {
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
-    # Active Open Trades Table
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_open_trades_v2 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v3 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -42,10 +41,10 @@ def connect_db():
             take_profit REAL,
             lot_size REAL DEFAULT 0.01,
             bias TEXT NOT NULL,
-            strategy_votes TEXT
+            strategy_votes TEXT,
+            candle_timestamp TEXT
         )
     """)
-    # Permanent Trade History Table (Never Deleted)
     con.execute("""
         CREATE TABLE IF NOT EXISTS trade_history (
             id INTEGER PRIMARY KEY,
@@ -155,7 +154,7 @@ def evaluate_price_lesson_strategies(df):
 
     if last.close > last.open and prev.close < prev.open and last.open <= prev.close and last.close >= prev.open:
         bullish_votes.append("Bullish Engulfing Pattern")
-    elif last.close < last.open and prev.close > prev.open and last.open >= prev.close and last.close <= prev.open:
+    elif last.close < last.open and prev.close > prev.open and last.open >= prev.close and last.open <= prev.open:
         bearish_votes.append("Bearish Engulfing Pattern")
 
     recent = df.iloc[-21:-1]
@@ -169,7 +168,7 @@ def evaluate_price_lesson_strategies(df):
     if last.close > last.open:
         bullish_votes.append("Bullish Momentum")
     else:
-        bearish_votes.append("Bearish Momentum")
+        bullish_votes.append("Bearish Momentum")
 
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
@@ -217,18 +216,25 @@ def update_balance(con, delta):
     con.commit()
     return new_bal
 
-def execute_auto_trade(con, symbol, timeframe, result, lot_size=0.01):
+def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts):
+    # Check if a trade is already taken for this exact candle timestamp
+    cursor = con.cursor()
+    cursor.execute("SELECT id FROM tv_open_trades_v3 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
+    if cursor.fetchone():
+        return False # Already traded this candle, prevent duplicate!
+        
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
-        "INSERT INTO tv_open_trades_v2 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"])
+        "INSERT INTO tv_open_trades_v3 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
     )
     con.commit()
+    return True
 
 def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v2 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v3 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
@@ -244,20 +250,18 @@ def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manua
     pnl_usd = round(diff * lot_size * multiplier, 2)
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
-    # Save to Permanent Trade History Table
     con.execute(
         "INSERT INTO trade_history (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, 2 if is_gold else 5), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    # Remove from Open Trades Table
-    con.execute("DELETE FROM tv_open_trades_v2 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v3 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
 def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True):
     cursor = con.cursor()
-    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_open_trades_v2")
+    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_open_trades_v3")
     open_trades = cursor.fetchall()
     
     tf_minutes = INTERVALS[timeframe_label]["minutes"]
@@ -303,7 +307,7 @@ def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True
 
 # --- STREAMLIT UI ---
 st.title("🪙 BIG MAN2 — TradingView Synchronized Bot")
-st.caption("Exact TradingView Broker Feed, Price Lesson Strategies & Permanent Trade History")
+st.caption("Anti-Duplicate Protection, Price Lesson Strategies & Permanent Trade History")
 
 con = connect_db()
 
@@ -324,8 +328,12 @@ with st.sidebar:
         df_temp, _ = get_tradingview_matched_data(symbol, timeframe)
         if not df_temp.empty:
             res_temp = evaluate_price_lesson_strategies(df_temp)
-            execute_auto_trade(con, symbol, timeframe, res_temp, lot_size=lot_input)
-            st.sidebar.success(f"Trade opened on {timeframe}!")
+            candle_ts = df_temp.index[-1]
+            success = execute_auto_trade(con, symbol, timeframe, res_temp, lot_size=lot_input, candle_ts=candle_ts)
+            if success:
+                st.sidebar.success(f"Trade opened on {timeframe}!")
+            else:
+                st.sidebar.warning("Is candle par pehle hi trade li ja chuki hai!")
 
     st.markdown("---")
     if st.button("🔄 Reset Demo Balance ($500)", use_container_width=True):
@@ -340,11 +348,12 @@ if not df.empty:
     result = evaluate_price_lesson_strategies(df)
     current_live_price = float(df.close.iloc[-1])
     is_gold = "XAU" in symbol
+    current_candle_ts = df.index[-1]
     
     check_auto_exit_conditions(con, current_live_price, timeframe, is_gold=is_gold)
     
     if auto_mode:
-        execute_auto_trade(con, symbol, timeframe, result, lot_size=lot_input)
+        execute_auto_trade(con, symbol, timeframe, result, lot_size=lot_input, candle_ts=current_candle_ts)
 
     curr_balance = get_current_balance(con)
     bal_color = "🟢" if curr_balance >= 500 else "🔴"
@@ -403,7 +412,7 @@ st.divider()
 st.subheader("📋 Active Open Trades")
 
 open_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v2 ORDER BY id DESC",
+    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v3 ORDER BY id DESC",
     con,
 )
 
