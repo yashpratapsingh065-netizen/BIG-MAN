@@ -1,99 +1,124 @@
 import os
 import sqlite3
-import time
 from datetime import datetime, timezone, timedelta
 
 import pandas as pd
-import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
-import yfinance as yf
+import requests
 
+# Indian Standard Time (IST) Offset: UTC + 5:30
 IST = timezone(timedelta(hours=5, minutes=30))
 
-st.set_page_config(
-    page_title="BIG MAN — XAUUSD Gold Trading Bot",
-    page_icon="🪙",
-    layout="wide"
-)
+st.set_page_config(page_title="BIG MAN2 — TradingView Synchronized Bot", page_icon="🪙", layout="wide")
 
-DB_PATH = os.getenv("BIGMAN_GOLD_DB_PATH", "bigman_gold_bot.db")
+DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_tradingview_bot.db")
 
-GOLD_SYMBOL = {"yf": "GC=F", "tv": "OANDA:XAUUSD", "lot": 1}
-
+SYMBOLS = {
+    "XAU/USD (Gold)": {"tv": "OANDA:XAUUSD", "td": "XAU/USD", "yf": "GC=F"},
+    "EUR/USD": {"tv": "FX:EURUSD", "td": "EUR/USD", "yf": "EURUSD=X"},
+    "GBP/USD": {"tv": "FX:GBPUSD", "td": "GBP/USD", "yf": "GBPUSD=X"},
+}
 INTERVALS = {
-    "5 min": {"yf": "5m", "minutes": 5, "tv": "5"},
-    "15 min": {"yf": "15m", "minutes": 15, "tv": "15"},
-    "1 hour": {"yf": "60m", "minutes": 60, "tv": "60"},
-    "1 day": {"yf": "1d", "minutes": 1440, "tv": "D"}
+    "5 min": {"td": "5min", "yf": "5m", "minutes": 5},
+    "15 min": {"td": "15min", "yf": "15m", "minutes": 15},
+    "1 hour": {"td": "1h", "yf": "60m", "minutes": 60},
+    "4 hours": {"td": "4h", "yf": "1h", "minutes": 240},
+    "1 day": {"td": "1day", "yf": "1d", "minutes": 1440}
 }
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS gold_open_trades (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v3 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
+            created_at_ist TEXT NOT NULL,
+            symbol TEXT NOT NULL,
             timeframe TEXT NOT NULL,
+            entry_time_utc TIMESTAMP NOT NULL,
             entry_price REAL,
             stop_loss REAL,
             take_profit REAL,
-            quantity INTEGER DEFAULT 1,
+            lot_size REAL DEFAULT 0.01,
             bias TEXT NOT NULL,
-            mode TEXT NOT NULL,
             strategy_votes TEXT,
             candle_timestamp TEXT
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS gold_trade_history (
+        CREATE TABLE IF NOT EXISTS trade_history (
             id INTEGER PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            closed_at TEXT NOT NULL,
+            created_at_ist TEXT NOT NULL,
+            closed_at_ist TEXT NOT NULL,
+            symbol TEXT NOT NULL,
             timeframe TEXT NOT NULL,
             entry_price REAL,
             exit_price REAL,
             stop_loss REAL,
             take_profit REAL,
-            quantity INTEGER,
+            lot_size REAL,
             bias TEXT NOT NULL,
-            mode TEXT NOT NULL,
             exit_reason TEXT NOT NULL,
             pnl REAL NOT NULL,
             strategy_votes TEXT
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS gold_account_balance (
+        CREATE TABLE IF NOT EXISTS account_balance (
             id INTEGER PRIMARY KEY,
             balance REAL NOT NULL
         )
     """)
     cursor = con.cursor()
-    cursor.execute("SELECT balance FROM gold_account_balance WHERE id = 1")
+    cursor.execute("SELECT balance FROM account_balance WHERE id = 1")
     row = cursor.fetchone()
     if not row:
-        con.execute("INSERT INTO gold_account_balance (id, balance) VALUES (1, 100.0)")
+        con.execute("INSERT INTO account_balance (id, balance) VALUES (1, 500.0)")
     con.commit()
     return con
 
-def fetch_gold_market_data(timeframe_label):
-    cfg = INTERVALS[timeframe_label]
+def get_tradingview_matched_data(symbol_label, interval_label, rows=250):
+    info = SYMBOLS[symbol_label]
+    cfg = INTERVALS[interval_label]
+    
+    # 1. Try Live Yahoo Spot Feed matching TradingView
     try:
-        df = yf.download(GOLD_SYMBOL["yf"], period="5d", interval=cfg["yf"], progress=False)
-        if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [col[0].lower() for col in df.columns]
-            else:
-                df.columns = [col.lower() for col in df.columns]
-            return df[["open", "high", "low", "close"]].tail(200), "XAUUSD Live Feed"
+        import yfinance as yf
+        ticker = yf.Ticker(info["yf"])
+        df_yf = ticker.history(period="5d", interval=cfg["yf"])
+        if not df_yf.empty:
+            df_yf = df_yf.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close"})
+            df_yf["datetime_ist"] = df_yf.index.tz_convert(IST)
+            return df_yf[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "TradingView Live Spot Feed"
     except Exception:
         pass
+
+    # 2. Secondary TwelveData Feed
+    td_key = st.secrets.get("TWELVE_DATA_API_KEY", os.getenv("TWELVE_DATA_API_KEY", "demo"))
+    try:
+        resp = requests.get(
+            "https://api.twelvedata.com/time_series",
+            params={"symbol": info["td"], "interval": cfg["td"], "outputsize": rows, "apikey": td_key},
+            timeout=8,
+        )
+        payload = resp.json()
+        if "values" in payload:
+            df = pd.DataFrame(payload["values"])
+            df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
+            df["datetime_ist"] = df["datetime"].dt.tz_convert(IST)
+            for c in ["open", "high", "low", "close"]:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            df = df.dropna(subset=["datetime", "open", "high", "low", "close"])
+            df = df.sort_values("datetime").set_index("datetime")
+            return df[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "TwelveData Direct"
+    except Exception:
+        pass
+        
     return pd.DataFrame(), "No Data"
 
-def evaluate_gold_strategy(df):
+def evaluate_price_lesson_strategies(df):
     if len(df) < 30:
-        return {"bias": "WAIT", "votes": "Insufficient Data", "bullish": 0, "bearish": 0, "entry": 0, "sl": 0, "tp": 0}
+        return {"bias":"WAIT", "votes":"Kam data uplabdh hai", "bullish":0, "bearish":0, "entry":0, "sl":0, "tp":0}
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -112,19 +137,37 @@ def evaluate_gold_strategy(df):
     bearish_votes = []
 
     if last.close < eq_50:
-        bullish_votes.append("Gold Discount Zone")
+        bullish_votes.append("Discount Zone (Cheap Area - Buy Bias)")
     else:
-        bearish_votes.append("Gold Premium Zone")
+        bearish_votes.append("Premium Zone (Expensive Area - Sell Bias)")
 
     if last.low > p_prev.high and prev.close > prev.open:
-        bullish_votes.append("Bullish FVG")
+        bullish_votes.append("Unmitigated Bullish FVG Imbalance")
     elif last.high < p_prev.low and prev.close < prev.open:
-        bearish_votes.append("Bearish FVG")
+        bearish_votes.append("Unmitigated Bearish FVG Imbalance")
 
     if lower_wick >= body * 1.5 and last.close > last.open:
-        bullish_votes.append("Demand Rejection")
+        bullish_votes.append("Demand Zone Strong Wick Rejection")
     elif upper_wick >= body * 1.5 and last.close < last.open:
-        bearish_votes.append("Supply Rejection")
+        bearish_votes.append("Supply Zone Strong Wick Rejection")
+
+    if last.close > last.open and prev.close < prev.open and last.open <= prev.close and last.close >= prev.open:
+        bullish_votes.append("Bullish Engulfing Pattern")
+    elif last.close < last.open and prev.close > prev.open and last.open >= prev.close and last.close <= prev.open:
+        bearish_votes.append("Bearish Engulfing Pattern")
+
+    recent = df.iloc[-21:-1]
+    prior_high = float(recent.high.max())
+    prior_low = float(recent.low.min())
+    if last.close > prior_high:
+        bullish_votes.append("Resistance High Breakout")
+    elif last.close < prior_low:
+        bullish_votes.append("Support Low Breakdown")
+
+    if last.close > last.open:
+        bullish_votes.append("Bullish Momentum")
+    else:
+        bearish_votes.append("Bearish Momentum")
 
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
@@ -134,179 +177,278 @@ def evaluate_gold_strategy(df):
     elif s_score > b_score:
         bias = "SELL"
     else:
-        bias = "WAIT"
+        bias = "BUY" if last.close >= last.open else "SELL"
 
-    curr_close = float(last.close)
-    sl_pts = max(rng * 1.5, 2.0)
-    tp_pts = max(rng * 3.0, 4.0)
+    current_close = float(last.close)
+    sl_buffer = max(rng * 1.5, 2.0 if current_close > 100 else 0.0020)
+    tp_buffer = max(rng * 3.0, 4.0 if current_close > 100 else 0.0040)
 
-    sl = curr_close - sl_pts if bias == "BUY" else curr_close + sl_pts
-    tp = curr_close + tp_pts if bias == "BUY" else curr_close - tp_pts
+    if bias == "BUY":
+        sl = current_close - sl_buffer
+        tp = current_close + tp_buffer
+    else:
+        sl = current_close + sl_buffer
+        tp = current_close - tp_buffer
 
-    votes_text = f"Bullish [{b_score}]: {', '.join(bullish_votes)} | Bearish [{s_score}]: {', '.join(bearish_votes)}"
+    all_votes_str = f"Bullish Confluence [{b_score}]: {', '.join(bullish_votes)} | Bearish Confluence [{s_score}]: {', '.join(bearish_votes)}"
 
     return {
         "bias": bias,
-        "votes": votes_text,
+        "votes": all_votes_str,
         "bullish": b_score,
         "bearish": s_score,
-        "entry": round(curr_close, 2),
-        "sl": round(sl, 2),
-        "tp": round(tp, 2)
+        "entry": round(current_close, 2 if current_close > 100 else 5),
+        "sl": round(sl, 2 if current_close > 100 else 5),
+        "tp": round(tp, 2 if current_close > 100 else 5)
     }
 
-def get_balance(con):
+def get_current_balance(con):
     cursor = con.cursor()
-    cursor.execute("SELECT balance FROM gold_account_balance WHERE id = 1")
+    cursor.execute("SELECT balance FROM account_balance WHERE id = 1")
     row = cursor.fetchone()
-    return float(row[0]) if row else 100.0
+    return float(row[0]) if row else 500.0
 
 def update_balance(con, delta):
-    new_bal = get_balance(con) + delta
-    con.execute("UPDATE gold_account_balance SET balance = ? WHERE id = 1", (new_bal,))
+    current = get_current_balance(con)
+    new_bal = current + delta
+    con.execute("UPDATE account_balance SET balance = ? WHERE id = 1", (new_bal,))
     con.commit()
     return new_bal
 
-def execute_trade(con, timeframe, result, qty, mode, candle_ts):
-    if result["bias"] == "WAIT":
-        return False
-
+def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts):
     cursor = con.cursor()
-    cursor.execute("SELECT id FROM gold_open_trades WHERE timeframe = ? AND candle_timestamp = ?", (timeframe, str(candle_ts)))
+    cursor.execute("SELECT id FROM tv_open_trades_v3 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
     if cursor.fetchone():
         return False
-
-    created_at = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p')
+        
+    created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
+    entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
-        "INSERT INTO gold_open_trades (created_at, timeframe, entry_price, stop_loss, take_profit, quantity, bias, mode, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (created_at, timeframe, result["entry"], result["sl"], result["tp"], qty, result["bias"], mode, result["votes"], str(candle_ts))
+        "INSERT INTO tv_open_trades_v3 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
     )
     con.commit()
     return True
 
-def close_trade(con, trade_id, current_price, reason="Manual Exit"):
+def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at, timeframe, entry_price, stop_loss, take_profit, quantity, bias, mode, strategy_votes FROM gold_open_trades WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v3 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
-
-    created_at, timeframe, entry_p, sl, tp, qty, bias, mode, votes = row
-    diff = (current_price - entry_p) if bias == "BUY" else (entry_p - current_price)
-    pnl = round(diff * qty, 2)
-    closed_at = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p')
-
+    
+    created_at_ist, symbol, timeframe, entry_price, sl, tp, lot_size, bias, strategy_votes = row
+    
+    if bias == "BUY":
+        diff = current_price - entry_price
+    else:
+        diff = entry_price - current_price
+        
+    multiplier = 100 if is_gold else 10000
+    pnl_usd = round(diff * lot_size * multiplier, 2)
+    closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
+    
     con.execute(
-        "INSERT INTO gold_trade_history (id, created_at, closed_at, timeframe, entry_price, exit_price, stop_loss, take_profit, quantity, bias, mode, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (trade_id, created_at, closed_at, timeframe, entry_p, round(current_price, 2), sl, tp, qty, bias, mode, reason, pnl, votes)
+        "INSERT INTO trade_history (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, 2 if is_gold else 5), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM gold_open_trades WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v3 WHERE id = ?", (trade_id,))
     con.commit()
-    update_balance(con, pnl)
-    return pnl
+    update_balance(con, pnl_usd)
+    return pnl_usd
 
-st.title("🪙 BIG MAN — XAUUSD Gold Trading Bot")
-st.caption("Precious Metals SMC & Price Action Engine")
+def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True):
+    cursor = con.cursor()
+    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_open_trades_v3")
+    open_trades = cursor.fetchall()
+    
+    tf_minutes = INTERVALS[timeframe_label]["minutes"]
+    now_utc = datetime.now(timezone.utc)
+    
+    for tid, symbol, tf, bias, entry, sl, tp, lot, entry_time_str in open_trades:
+        closed = False
+        exit_p = current_price
+        reason = "Manual Close 👤"
+        
+        if bias == "BUY":
+            if current_price >= tp:
+                exit_p = tp
+                reason = "TP Hitter 🎯"
+                closed = True
+            elif current_price <= sl:
+                exit_p = sl
+                reason = "SL Hitter 🛑"
+                closed = True
+        elif bias == "SELL":
+            if current_price <= tp:
+                exit_p = tp
+                reason = "TP Hitter 🎯"
+                closed = True
+            elif current_price >= sl:
+                exit_p = sl
+                reason = "SL Hitter 🛑"
+                closed = True
+                
+        if not closed and tf == timeframe_label:
+            try:
+                entry_dt = datetime.strptime(entry_time_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                elapsed_mins = (now_utc - entry_dt).total_seconds() / 60.0
+                if elapsed_mins >= tf_minutes:
+                    exit_p = current_price
+                    reason = f"Time Expired ({tf}) ⏱️"
+                    closed = True
+            except Exception:
+                pass
+                
+        if closed:
+            close_single_trade(con, tid, exit_p, is_gold=is_gold, reason=reason)
+
+# --- STREAMLIT UI ---
+st.title("🪙 BIG MAN2 — TradingView Synchronized Bot")
+st.caption("Anti-Duplicate Protection, Price Lesson Strategies & Permanent Trade History")
 
 con = connect_db()
 
 with st.sidebar:
-    st.header("Control Panel")
-    selected_tf = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
-    trade_qty = st.number_input("Quantity / Lots", min_value=1, max_value=1000, value=1, step=1)
+    st.header("⚙️ Control Panel")
+    symbol = st.selectbox("Select Asset", list(SYMBOLS.keys()), index=0)
+    timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
+    lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.01, step=0.01)
+    
+    if st.button("🔄 Refresh TV Market Data", use_container_width=True):
+        st.toast("Synced with TradingView price feed!", icon="🔄")
     
     st.markdown("---")
-    trading_mode = st.radio("Mode", ["PAPER TRADING", "LIVE (API)"], index=0)
+    st.subheader("⚡ Execution Mode")
+    auto_mode = st.toggle("Enable Auto-Pilot", value=False)
     
-    auto_pilot = st.toggle("Auto-Pilot Execution", value=False)
-    
-    if st.button("Execute Gold Trade", use_container_width=True):
-        df_temp, _ = fetch_gold_market_data(selected_tf)
+    if st.button("➕ Open New TV Trade", use_container_width=True):
+        df_temp, _ = get_tradingview_matched_data(symbol, timeframe)
         if not df_temp.empty:
-            res_temp = evaluate_gold_strategy(df_temp)
+            res_temp = evaluate_price_lesson_strategies(df_temp)
             candle_ts = df_temp.index[-1]
-            mode_str = "LIVE" if "LIVE" in trading_mode else "PAPER"
-            ok = execute_trade(con, selected_tf, res_temp, trade_qty, mode_str, candle_ts)
-            if ok:
-                st.sidebar.success("Gold trade executed!")
+            success = execute_auto_trade(con, symbol, timeframe, res_temp, lot_size=lot_input, candle_ts=candle_ts)
+            if success:
+                st.sidebar.success(f"Trade opened on {timeframe}!")
             else:
-                st.sidebar.warning("Trade blocked: WAIT signal or already executed.")
+                st.sidebar.warning("Is candle par pehle hi trade li ja chuki hai!")
 
     st.markdown("---")
-    if st.button("Reset Balance to ₹100", use_container_width=True):
-        con.execute("UPDATE gold_account_balance SET balance = 100.0 WHERE id = 1")
+    if st.button("🔄 Reset Demo Balance ($500)", use_container_width=True):
+        con.execute("UPDATE account_balance SET balance = 500.0 WHERE id = 1")
         con.commit()
-        st.sidebar.success("Balance reset!")
+        st.sidebar.success("Balance reset to $500.00!")
         st.rerun()
 
-df_live, feed_source = fetch_gold_market_data(selected_tf)
+df, data_source = get_tradingview_matched_data(symbol, timeframe)
 
-if not df_live.empty:
-    strategy_res = evaluate_gold_strategy(df_live)
-    live_p = float(df_live.close.iloc[-1])
-    curr_ts = df_live.index[-1]
-    mode_str = "LIVE" if "LIVE" in trading_mode else "PAPER"
-
-    if auto_pilot:
-        execute_trade(con, selected_tf, strategy_res, trade_qty, mode_str, curr_ts)
-
-    curr_bal = get_balance(con)
-    st.markdown(f"### Account Balance: **$ {curr_bal:,.2f} USD**")
+if not df.empty:
+    result = evaluate_price_lesson_strategies(df)
+    current_live_price = float(df.close.iloc[-1])
+    is_gold = "XAU" in symbol
+    current_candle_ts = df.index[-1]
     
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Live Gold Price (XAUUSD)", f"${live_p:,.2f}")
-    c2.metric("Signal Bias", strategy_res["bias"])
-    c3.metric("Confluence Score", f"Bull: {strategy_res['bullish']} | Bear: {strategy_res['bearish']}")
+    check_auto_exit_conditions(con, current_live_price, timeframe, is_gold=is_gold)
+    
+    if auto_mode:
+        execute_auto_trade(con, symbol, timeframe, result, lot_size=lot_input, candle_ts=current_candle_ts)
+
+    curr_balance = get_current_balance(con)
+    bal_color = "🟢" if curr_balance >= 500 else "🔴"
+    st.markdown(f"### 💵 Account Balance: **${curr_balance:,.2f} USD** {bal_color}")
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Live TradingView Price", f"{current_live_price:.2f}" if is_gold else f"{current_live_price:.5f}")
+    col2.metric("Signal Bias", result["bias"])
+    col3.metric("Confluence Score", f"Bull: {result['bullish']} | Bear: {result['bearish']}")
 
 st.divider()
 
-col_chart, col_details = st.columns([1.8, 1])
+left, right = st.columns([1.8, 1])
 
-with col_chart:
-    st.subheader("Live XAUUSD Chart")
-    tv_tf = INTERVALS[selected_tf]["tv"]
-    
-    tv_widget_html = f"""
+with left:
+    st.subheader(f"📈 Live TradingView Chart ({symbol} - {timeframe})")
+    tv_symbol = SYMBOLS[symbol]["tv"]
+    tv_interval = {"5 min": "5", "15 min": "15", "1 hour": "60", "4 hours": "240", "1 day": "D"}[timeframe]
+    html = f"""
     <div class="tradingview-widget-container" style="height:480px;width:100%">
-      <div id="tv_chart_gold" style="height:460px;width:100%"></div>
+      <div id="tradingview_chart" style="height:460px;width:100%"></div>
       <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
       <script type="text/javascript">
       new TradingView.widget({{
         "autosize": true,
-        "symbol": "OANDA:XAUUSD",
-        "interval": "{tv_tf}",
+        "symbol": "{tv_symbol}",
+        "interval": "{tv_interval}",
         "timezone": "Asia/Kolkata",
         "theme": "dark",
         "style": "1",
         "locale": "en",
         "enable_publishing": false,
-        "allow_symbol_change": false,
-        "container_id": "tv_chart_gold"
+        "allow_symbol_change": true,
+        "hide_side_toolbar": false,
+        "container_id": "tradingview_chart"
       }});
       </script>
     </div>
     """
-    components.html(tv_widget_html, height=490, scrolling=False)
+    components.html(html, height=490, scrolling=False)
 
-with col_details:
-    st.subheader("Strategy Details")
-    if not df_live.empty:
-        st.write(f"**Votes:** {strategy_res['votes']}")
-        st.write(f"**Stop Loss:** `${strategy_res['sl']:,.2f}` | **Take Profit:** `${strategy_res['tp']:,.2f}`")
+with right:
+    st.subheader("💡 Price Lesson Video Confluence")
+    if not df.empty:
+        st.write(f"**Strategy Breakdown:** {result['votes']}")
+        fmt = ".2f" if "XAU" in symbol else ".5f"
+        st.write(f"**Stop Loss:** `{result['sl']:{fmt}}` | **Take Profit:** `{result['tp']:{fmt}}`")
+        st.markdown(f"*Feed Source: {data_source}*")
+        st.markdown("---")
+        view = df.tail(4).copy()
+        view.index = view.index.strftime('%d %b %I:%M %p')
+        st.dataframe(view, use_container_width=True)
 
 st.divider()
 
-st.subheader("Active Gold Positions")
-open_trades_df = pd.read_sql_query("SELECT * FROM gold_open_trades ORDER BY id DESC", con)
+st.subheader("📋 Active Open Trades")
 
-if open_trades_df.empty:
-    st.info("No active gold positions.")
+open_df = pd.read_sql_query(
+    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v3 ORDER BY id DESC",
+    con,
+)
+
+if open_df.empty:
+    st.info("Abhi koi open trade nahi hai.")
 else:
-    for idx, r in open_trades_df.iterrows():
-        with st.expander(f"Trade #{r['id']} | XAUUSD ({r['bias']} - {r['quantity']} Lot)"):
-            if st.button(f"Square Off #{r['id']}", key=f"sq_gold_{r['id']}"):
-                pnl = close_trade(con, r['id'], live_p, reason="Manual Square-Off")
-                st.toast(f"Trade #{r['id']} closed! PnL: ${pnl:+,.2f}")
+    for index, row in open_df.iterrows():
+        fmt = ".2f" if "XAU" in row['symbol'] else ".5f"
+        with st.expander(f"📌 Trade ID #{row['id']} | {row['symbol']} ({row['bias']} - {row['lot_size']} Lot) - TF: {row['timeframe']}"):
+            c1, c2 = st.columns(2)
+            c1.markdown(f"🕒 **Entry Time:** `{row['created_at_ist']}`\n📍 **Entry Price:** `{row['entry_price']:{fmt}}`\n🛑 **Stop Loss:** `{row['stop_loss']:{fmt}}`")
+            c2.markdown(f"🎯 **Take Profit:** `{row['take_profit']:{fmt}}`\n⚡ **Status:** `OPEN`\n📊 **Votes:** `{row['strategy_votes']}`")
+            
+            if st.button(f"Close Trade #{row['id']} Now", key=f"close_open_{row['id']}"):
+                current_p = float(df.close.iloc[-1]) if not df.empty else row['entry_price']
+                pnl_realized = close_single_trade(con, row['id'], current_p, is_gold=("XAU" in row['symbol']), reason="Manual Close 👤")
+                st.toast(f"Trade #{row['id']} closed! PnL: ${pnl_realized:+.2f}")
                 st.rerun()
+
+st.divider()
+
+st.subheader("📜 Trade History (Permanent Storage)")
+
+history_df = pd.read_sql_query(
+    "SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, exit_reason, pnl, strategy_votes FROM trade_history ORDER BY id DESC LIMIT 50",
+    con,
+)
+
+if history_df.empty:
+    st.info("Abhi tak koi trade history me saved nahi hai.")
+else:
+    for index, row in history_df.iterrows():
+        pnl_color = "🟢" if row['pnl'] >= 0 else "🔴"
+        fmt = ".2f" if "XAU" in row['symbol'] else ".5f"
+        with st.expander(f"{pnl_color} ID #{row['id']} | {row['symbol']} ({row['bias']}) | PnL: ${row['pnl']:+.2f} | Reason: {row['exit_reason']}"):
+            c1, c2 = st.columns(2)
+            c1.markdown(f"🕒 **Entry Time:** `{row['created_at_ist']}`\n🕒 **Exit Time:** `{row['closed_at_ist']}`\n⏱️ **Timeframe:** `{row['timeframe']}`\n📦 **Lot Size:** `{row['lot_size']}`")
+            c2.markdown(f"📍 **Entry Price:** `{row['entry_price']:{fmt}}`\n🏁 **Exit Price:** `{row['exit_price']:{fmt}}`\n🏷️ **Exit Reason:** `{row['exit_reason']}`\n💰 **Net PnL:** `${row['pnl']:+.2f}`")
+            st.markdown(f"📊 **Strategy Confluence at Entry:** `{row['strategy_votes']}`")
 
 con.close()
