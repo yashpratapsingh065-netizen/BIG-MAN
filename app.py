@@ -77,11 +77,25 @@ def connect_db():
     con.commit()
     return con
 
+def get_forex_market_status():
+    now_utc = datetime.now(timezone.utc)
+    # Forex & Gold markets close Friday 22:00 UTC and reopen Sunday 22:00 UTC
+    weekday = now_utc.weekday()
+    hour = now_utc.hour
+    
+    if weekday == 5: # Saturday
+        return "CLOSED", "🔴 Market Closed (Weekend Saturday)"
+    elif weekday == 6 and hour < 22: # Sunday before market open
+        return "CLOSED", "🔴 Market Closed (Weekend Sunday)"
+    elif weekday == 4 and hour >= 22: # Friday after market close
+        return "CLOSED", "🔴 Market Closed (Weekend Friday Evening)"
+    else:
+        return "OPEN", "🟢 International Forex/Gold Market Live"
+
 def get_tradingview_matched_data(symbol_label, interval_label, rows=250):
     info = SYMBOLS[symbol_label]
     cfg = INTERVALS[interval_label]
     
-    # 1. Try Live Yahoo Spot Feed matching TradingView
     try:
         import yfinance as yf
         ticker = yf.Ticker(info["yf"])
@@ -93,7 +107,6 @@ def get_tradingview_matched_data(symbol_label, interval_label, rows=250):
     except Exception:
         pass
 
-    # 2. Secondary TwelveData Feed
     td_key = st.secrets.get("TWELVE_DATA_API_KEY", os.getenv("TWELVE_DATA_API_KEY", "demo"))
     try:
         resp = requests.get(
@@ -162,7 +175,7 @@ def evaluate_price_lesson_strategies(df):
     if last.close > prior_high:
         bullish_votes.append("Resistance High Breakout")
     elif last.close < prior_low:
-        bullish_votes.append("Support Low Breakdown")
+        bearish_votes.append("Support Low Breakdown")
 
     if last.close > last.open:
         bullish_votes.append("Bullish Momentum")
@@ -215,11 +228,14 @@ def update_balance(con, delta):
     con.commit()
     return new_bal
 
-def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts):
+def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, market_status="OPEN", allow_weekend_practice=True):
+    if market_status != "OPEN" and not allow_weekend_practice:
+        return False, "Market Closed! Enable Weekend Practice Mode in sidebar to test."
+        
     cursor = con.cursor()
     cursor.execute("SELECT id FROM tv_open_trades_v3 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
     if cursor.fetchone():
-        return False
+        return False, "Is candle par pehle hi trade li ja chuki hai!"
         
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
@@ -228,7 +244,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts):
         (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
     )
     con.commit()
-    return True
+    return True, "Trade opened successfully!"
 
 def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manual Close 👤"):
     cursor = con.cursor()
@@ -308,6 +324,7 @@ st.title("🪙 BIG MAN2 — TradingView Synchronized Bot")
 st.caption("Anti-Duplicate Protection, Price Lesson Strategies & Permanent Trade History")
 
 con = connect_db()
+m_status, m_text = get_forex_market_status()
 
 with st.sidebar:
     st.header("⚙️ Control Panel")
@@ -320,6 +337,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader("⚡ Execution Mode")
+    weekend_practice = st.checkbox("Allow Weekend Practice/Testing Mode", value=True)
     auto_mode = st.toggle("Enable Auto-Pilot", value=False)
     
     if st.button("➕ Open New TV Trade", use_container_width=True):
@@ -327,11 +345,11 @@ with st.sidebar:
         if not df_temp.empty:
             res_temp = evaluate_price_lesson_strategies(df_temp)
             candle_ts = df_temp.index[-1]
-            success = execute_auto_trade(con, symbol, timeframe, res_temp, lot_size=lot_input, candle_ts=candle_ts)
+            success, msg = execute_auto_trade(con, symbol, timeframe, res_temp, lot_size=lot_input, candle_ts=candle_ts, market_status=m_status, allow_weekend_practice=weekend_practice)
             if success:
                 st.sidebar.success(f"Trade opened on {timeframe}!")
             else:
-                st.sidebar.warning("Is candle par pehle hi trade li ja chuki hai!")
+                st.sidebar.warning(msg)
 
     st.markdown("---")
     if st.button("🔄 Reset Demo Balance ($500)", use_container_width=True):
@@ -340,6 +358,7 @@ with st.sidebar:
         st.sidebar.success("Balance reset to $500.00!")
         st.rerun()
 
+st.info(f"Market Status: **{m_text}**")
 df, data_source = get_tradingview_matched_data(symbol, timeframe)
 
 if not df.empty:
@@ -350,8 +369,8 @@ if not df.empty:
     
     check_auto_exit_conditions(con, current_live_price, timeframe, is_gold=is_gold)
     
-    if auto_mode:
-        execute_auto_trade(con, symbol, timeframe, result, lot_size=lot_input, candle_ts=current_candle_ts)
+    if auto_mode and (m_status == "OPEN" or weekend_practice):
+        execute_auto_trade(con, symbol, timeframe, result, lot_size=lot_input, candle_ts=current_candle_ts, market_status=m_status, allow_weekend_practice=weekend_practice)
 
     curr_balance = get_current_balance(con)
     bal_color = "🟢" if curr_balance >= 500 else "🔴"
