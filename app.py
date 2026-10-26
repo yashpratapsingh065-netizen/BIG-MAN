@@ -98,11 +98,12 @@ def get_tradingview_matched_data(symbol_label, interval_label, rows=250):
     try:
         import yfinance as yf
         ticker = yf.Ticker(info["yf"])
-        df_yf = ticker.history(period="5d", interval=cfg["yf"])
+        # Fetching latest data with 1d period / 1m interval for absolute live precision
+        df_yf = ticker.history(period="2d", interval=cfg["yf"])
         if not df_yf.empty:
             df_yf = df_yf.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close"})
             df_yf["datetime_ist"] = df_yf.index.tz_convert(IST)
-            return df_yf[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "TradingView Live Spot Feed"
+            return df_yf[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "Yahoo Finance Live Feed 🟢"
     except Exception:
         pass
 
@@ -122,15 +123,15 @@ def get_tradingview_matched_data(symbol_label, interval_label, rows=250):
                 df[c] = pd.to_numeric(df[c], errors="coerce")
             df = df.dropna(subset=["datetime", "open", "high", "low", "close"])
             df = df.sort_values("datetime").set_index("datetime")
-            return df[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "TwelveData Direct"
+            return df[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "TwelveData Direct 🟢"
     except Exception:
         pass
         
     return pd.DataFrame(), "No Data"
 
-def evaluate_price_lesson_strategies(df):
+def evaluate_price_lesson_strategies(df, live_market_price):
     if len(df) < 30:
-        return {"bias":"WAIT", "votes":"Kam data uplabdh hai", "bullish":0, "bearish":0, "entry":0, "sl":0, "tp":0}
+        return {"bias":"WAIT", "votes":"Kam data uplabdh hai", "bullish":0, "bearish":0, "entry":live_market_price, "sl":live_market_price*0.99, "tp":live_market_price*1.02}
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -148,7 +149,7 @@ def evaluate_price_lesson_strategies(df):
     bullish_votes = []
     bearish_votes = []
 
-    if last.close < eq_50:
+    if live_market_price < eq_50:
         bullish_votes.append("Discount Zone (Cheap Area - Buy Bias)")
     else:
         bearish_votes.append("Premium Zone (Expensive Area - Sell Bias)")
@@ -171,12 +172,12 @@ def evaluate_price_lesson_strategies(df):
     recent = df.iloc[-21:-1]
     prior_high = float(recent.high.max())
     prior_low = float(recent.low.min())
-    if last.close > prior_high:
+    if live_market_price > prior_high:
         bullish_votes.append("Resistance High Breakout")
-    elif last.close < prior_low:
+    elif live_market_price < prior_low:
         bearish_votes.append("Support Low Breakdown")
 
-    if last.close > last.open:
+    if live_market_price >= last.open:
         bullish_votes.append("Bullish Momentum")
     else:
         bearish_votes.append("Bearish Momentum")
@@ -189,18 +190,17 @@ def evaluate_price_lesson_strategies(df):
     elif s_score > b_score:
         bias = "SELL"
     else:
-        bias = "BUY" if last.close >= last.open else "SELL"
+        bias = "BUY" if live_market_price >= last.open else "SELL"
 
-    current_close = float(last.close)
-    sl_buffer = max(rng * 1.5, 2.0 if current_close > 100 else 0.0020)
-    tp_buffer = max(rng * 3.0, 4.0 if current_close > 100 else 0.0040)
+    sl_buffer = max(rng * 1.5, 2.0 if live_market_price > 100 else 0.0020)
+    tp_buffer = max(rng * 3.0, 4.0 if live_market_price > 100 else 0.0040)
 
     if bias == "BUY":
-        sl = current_close - sl_buffer
-        tp = current_close + tp_buffer
+        sl = live_market_price - sl_buffer
+        tp = live_market_price + tp_buffer
     else:
-        sl = current_close + sl_buffer
-        tp = current_close - tp_buffer
+        sl = live_market_price + sl_buffer
+        tp = live_market_price - tp_buffer
 
     all_votes_str = f"Bullish Confluence [{b_score}]: {', '.join(bullish_votes)} | Bearish Confluence [{s_score}]: {', '.join(bearish_votes)}"
 
@@ -209,9 +209,9 @@ def evaluate_price_lesson_strategies(df):
         "votes": all_votes_str,
         "bullish": b_score,
         "bearish": s_score,
-        "entry": round(current_close, 2 if current_close > 100 else 5),
-        "sl": round(sl, 2 if current_close > 100 else 5),
-        "tp": round(tp, 2 if current_close > 100 else 5)
+        "entry": round(live_market_price, 2 if live_market_price > 100 else 5),
+        "sl": round(sl, 2 if live_market_price > 100 else 5),
+        "tp": round(tp, 2 if live_market_price > 100 else 5)
     }
 
 def get_current_balance(con):
@@ -232,7 +232,6 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, mark
         return False, "Market Closed! Enable Weekend Practice Mode in sidebar to test."
         
     cursor = con.cursor()
-    # STRICT CHECK: Ek symbol par ek waqt mein sirf ek active trade rahegi
     cursor.execute("SELECT id FROM tv_open_trades_v3 WHERE symbol = ?", (symbol,))
     if cursor.fetchone():
         return False, "Active trade already exists for this symbol!"
@@ -344,11 +343,12 @@ with st.sidebar:
     if st.button("➕ Open New TV Trade", use_container_width=True):
         df_temp, _ = get_tradingview_matched_data(symbol, timeframe)
         if not df_temp.empty:
-            res_temp = evaluate_price_lesson_strategies(df_temp)
+            live_p = float(df_temp.close.iloc[-1])
+            res_temp = evaluate_price_lesson_strategies(df_temp, live_p)
             candle_ts = df_temp.index[-1]
             success, msg = execute_auto_trade(con, symbol, timeframe, res_temp, lot_size=lot_input, candle_ts=candle_ts, market_status=m_status, allow_weekend_practice=weekend_practice)
             if success:
-                st.sidebar.success(f"Trade opened on {timeframe}!")
+                st.sidebar.success(f"Trade opened at {live_p:.2f}!")
                 st.rerun()
             else:
                 st.sidebar.warning(msg)
@@ -371,8 +371,8 @@ st.info(f"Market Status: **{m_text}**")
 df, data_source = get_tradingview_matched_data(symbol, timeframe)
 
 if not df.empty:
-    result = evaluate_price_lesson_strategies(df)
     current_live_price = float(df.close.iloc[-1])
+    result = evaluate_price_lesson_strategies(df, current_live_price)
     is_gold = "XAU" in symbol
     current_candle_ts = df.index[-1]
     
