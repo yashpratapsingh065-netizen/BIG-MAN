@@ -20,11 +20,11 @@ SYMBOLS = {
     "GBP/USD": {"tv": "FX:GBPUSD", "td": "GBP/USD", "yf": "GBPUSD=X"},
 }
 INTERVALS = {
-    "5 min": {"td": "5min", "yf": "5m", "minutes": 5},
-    "15 min": {"td": "15min", "yf": "15m", "minutes": 15},
-    "1 hour": {"td": "1h", "yf": "60m", "minutes": 60},
-    "4 hours": {"td": "4h", "yf": "1h", "minutes": 240},
-    "1 day": {"td": "1day", "yf": "1d", "minutes": 1440}
+    "5 min": {"td": "5min", "yf": "5m", "tv_int": "5", "minutes": 5},
+    "15 min": {"td": "15min", "yf": "15m", "tv_int": "15", "minutes": 15},
+    "1 hour": {"td": "1h", "yf": "60m", "tv_int": "60", "minutes": 60},
+    "4 hours": {"tv_int": "4h", "yf": "1h", "tv_int": "240", "minutes": 240},
+    "1 day": {"td": "1day", "yf": "1d", "tv_int": "D", "minutes": 1440}
 }
 
 def connect_db():
@@ -98,7 +98,6 @@ def get_tradingview_matched_data(symbol_label, interval_label, rows=250):
     try:
         import yfinance as yf
         ticker = yf.Ticker(info["yf"])
-        # Fetching latest data with 1d period / 1m interval for absolute live precision
         df_yf = ticker.history(period="2d", interval=cfg["yf"])
         if not df_yf.empty:
             df_yf = df_yf.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close"})
@@ -175,12 +174,12 @@ def evaluate_price_lesson_strategies(df, live_market_price):
     if live_market_price > prior_high:
         bullish_votes.append("Resistance High Breakout")
     elif live_market_price < prior_low:
-        bearish_votes.append("Support Low Breakdown")
+        bullish_votes.append("Support Low Breakdown")
 
     if live_market_price >= last.open:
         bullish_votes.append("Bullish Momentum")
     else:
-        bearish_votes.append("Bearish Momentum")
+        bullish_votes.append("Bearish Momentum")
 
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
@@ -397,29 +396,15 @@ left, right = st.columns([1.8, 1])
 with left:
     st.subheader(f"📈 Live TradingView Chart ({symbol} - {timeframe})")
     tv_symbol = SYMBOLS[symbol]["tv"]
-    tv_interval = {"5 min": "5", "15 min": "15", "1 hour": "60", "4 hours": "240", "1 day": "D"}[timeframe]
-    html = f"""
-    <div class="tradingview-widget-container" style="height:480px;width:100%">
-      <div id="tradingview_chart" style="height:460px;width:100%"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-      new TradingView.widget({{
-        "autosize": true,
-        "symbol": "{tv_symbol}",
-        "interval": "{tv_interval}",
-        "timezone": "Asia/Kolkata",
-        "theme": "dark",
-        "style": "1",
-        "locale": "en",
-        "enable_publishing": false,
-        "allow_symbol_change": true,
-        "hide_side_toolbar": false,
-        "container_id": "tradingview_chart"
-      }});
-      </script>
+    tv_int = INTERVALS[timeframe]["tv_int"]
+    
+    # Stable TradingView Embed Widget iframe (Fixes loading spinner issue on mobile)
+    chart_html = f"""
+    <div style="height:480px;width:100%">
+      <iframe src="https://s.tradingview.com/widgetembed/?symbol={tv_symbol}&interval={tv_int}&hidesidetoolbar=0&hidetoptoolbar=0&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Asia%2FKolkata&locale=en" style="width:100%;height:480px;border:none;" scrolling="no"></iframe>
     </div>
     """
-    components.html(html, height=490, scrolling=False)
+    components.html(chart_html, height=495, scrolling=False)
 
 with right:
     st.subheader("💡 Price Lesson Video Confluence")
