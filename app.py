@@ -79,7 +79,6 @@ def connect_db():
 
 def get_forex_market_status():
     now_utc = datetime.now(timezone.utc)
-    # Forex & Gold markets close Friday 22:00 UTC and reopen Sunday 22:00 UTC
     weekday = now_utc.weekday()
     hour = now_utc.hour
     
@@ -233,9 +232,10 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, mark
         return False, "Market Closed! Enable Weekend Practice Mode in sidebar to test."
         
     cursor = con.cursor()
-    cursor.execute("SELECT id FROM tv_open_trades_v3 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
+    # STRICT CHECK: Ek symbol par ek waqt mein sirf ek active trade rahegi
+    cursor.execute("SELECT id FROM tv_open_trades_v3 WHERE symbol = ?", (symbol,))
     if cursor.fetchone():
-        return False, "Is candle par pehle hi trade li ja chuki hai!"
+        return False, "Active trade already exists for this symbol!"
         
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
@@ -334,6 +334,7 @@ with st.sidebar:
     
     if st.button("🔄 Refresh TV Market Data", use_container_width=True):
         st.toast("Synced with TradingView price feed!", icon="🔄")
+        st.rerun()
     
     st.markdown("---")
     st.subheader("⚡ Execution Mode")
@@ -348,10 +349,18 @@ with st.sidebar:
             success, msg = execute_auto_trade(con, symbol, timeframe, res_temp, lot_size=lot_input, candle_ts=candle_ts, market_status=m_status, allow_weekend_practice=weekend_practice)
             if success:
                 st.sidebar.success(f"Trade opened on {timeframe}!")
+                st.rerun()
             else:
                 st.sidebar.warning(msg)
 
     st.markdown("---")
+    if st.button("🗑️ Clear All Open Trades & History", use_container_width=True):
+        con.execute("DELETE FROM tv_open_trades_v3")
+        con.execute("DELETE FROM trade_history")
+        con.commit()
+        st.sidebar.success("All data cleared successfully!")
+        st.rerun()
+
     if st.button("🔄 Reset Demo Balance ($500)", use_container_width=True):
         con.execute("UPDATE account_balance SET balance = 500.0 WHERE id = 1")
         con.commit()
