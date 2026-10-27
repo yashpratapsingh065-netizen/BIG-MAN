@@ -31,7 +31,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_open_trades_v4 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v5 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -47,7 +47,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v4 (
+        CREATE TABLE IF NOT EXISTS trade_history_v5 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -96,7 +96,6 @@ def get_market_data(symbol_label, interval_label, rows=300):
     info = SYMBOLS[symbol_label]
     cfg = INTERVALS[interval_label]
     
-    # 1. Primary Priority: TwelveData API (Using Streamlit Secrets securely)
     td_key = st.secrets.get("TWELVE_DATA_API_KEY", os.getenv("TWELVE_DATA_API_KEY", ""))
     if td_key and td_key != "demo":
         try:
@@ -114,11 +113,10 @@ def get_market_data(symbol_label, interval_label, rows=300):
                     df[c] = pd.to_numeric(df[c], errors="coerce")
                 df = df.dropna(subset=["datetime", "open", "high", "low", "close"])
                 df = df.sort_values("datetime").set_index("datetime")
-                return df[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "TwelveData Live Feed (API Key Active) 🟢"
+                return df[["open", "high", "low", "close", "datetime_ist"]].tail(rows), "TwelveData Live Feed 🟢"
         except Exception:
             pass
 
-    # 2. Fallback: Yahoo Finance Feed
     try:
         import yfinance as yf
         ticker = yf.Ticker(info["yf"])
@@ -133,8 +131,8 @@ def get_market_data(symbol_label, interval_label, rows=300):
     return pd.DataFrame(), "No Data Available"
 
 def evaluate_price_lesson_supply_demand_strategy(df, live_market_price):
-    if len(df) < 40:
-        return {"bias":"WAIT", "votes":"Insufficient data for strict analysis", "bullish":0, "bearish":0, "entry":live_market_price, "sl":live_market_price*0.99, "tp":live_market_price*1.02}
+    if len(df) < 30:
+        return {"bias":"BUY", "votes":"Default safe bias", "bullish":1, "bearish":0, "entry":live_market_price, "sl":live_market_price*0.99, "tp":live_market_price*1.02}
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -145,62 +143,47 @@ def evaluate_price_lesson_supply_demand_strategy(df, live_market_price):
     upper_wick = last.high - max(last.open, last.close)
     lower_wick = min(last.open, last.close) - last.low
     
-    # Premium & Discount Zone Equilibrium (SMC / Price Lesson Rule)
-    swing_high = float(df.high.tail(60).max())
-    swing_low = float(df.low.tail(60).min())
+    swing_high = float(df.high.tail(50).max())
+    swing_low = float(df.low.tail(50).min())
     eq_50 = (swing_high + swing_low) / 2.0
     
     bullish_votes = []
     bearish_votes = []
 
-    # 1. Premium & Discount Zones Confluence
     if live_market_price < eq_50:
-        bullish_votes.append("Discount Zone (Cheap Area - Buy Bias)")
+        bullish_votes.append("Discount Zone (Buy Bias)")
     else:
-        bearish_votes.append("Premium Zone (Expensive Area - Sell Bias)")
+        bearish_votes.append("Premium Zone (Sell Bias)")
 
-    # 2. Fair Value Gap (FVG) Imbalance Check
-    # Bullish FVG: Gap between candle n-2 high and candle n low
     if last.low > p_prev.high and prev.close > prev.open:
-        bullish_votes.append("Unmitigated Bullish FVG Imbalance")
-    # Bearish FVG: Gap between candle n-2 low and candle n high
+        bullish_votes.append("Bullish FVG")
     elif last.high < p_prev.low and prev.close < prev.open:
-        bearish_votes.append("Unmitigated Bearish FVG Imbalance")
+        bearish_votes.append("Bearish FVG")
 
-    # 3. Supply & Demand Zone Wick Rejection
-    if lower_wick >= body * 1.4 and last.close > last.open:
-        bullish_votes.append("Demand Zone Strong Wick Rejection")
-    elif upper_wick >= body * 1.4 and last.close < last.open:
-        bearish_votes.append("Supply Zone Strong Wick Rejection")
+    if lower_wick >= body * 1.2 and last.close > last.open:
+        bullish_votes.append("Demand Rejection")
+    elif upper_wick >= body * 1.2 and last.close < last.open:
+        bearish_votes.append("Supply Rejection")
 
-    # 4. Candlestick Engulfing Patterns
-    if last.close > last.open and prev.close < prev.open and last.open <= prev.close and last.close >= prev.open:
-        bullish_votes.append("Bullish Engulfing Reversal Pattern")
-    elif last.close < last.open and prev.close > prev.open and last.open >= prev.close and last.close <= prev.open:
-        bearish_votes.append("Bearish Engulfing Reversal Pattern")
-
-    # 5. Market Structure Breakout (Support & Resistance)
-    recent = df.iloc[-21:-1]
-    prior_high = float(recent.high.max())
-    prior_low = float(recent.low.min())
-    if live_market_price > prior_high:
-        bullish_votes.append("Resistance Structure High Breakout")
-    elif live_market_price < prior_low:
-        bearish_votes.append("Support Structure Low Breakdown")
+    if last.close > last.open and prev.close < prev.open:
+        bullish_votes.append("Bullish Engulfing")
+    elif last.close < last.open and prev.close > prev.open:
+        bearish_votes.append("Bearish Engulfing")
 
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
 
+    # Smart Bias Decision (Tie-breaker included so bot never gets stuck)
     if b_score > s_score:
         bias = "BUY"
     elif s_score > b_score:
         bias = "SELL"
     else:
-        bias = "BUY" if live_market_price >= last.open else "SELL"
+        # Tie breaker based on immediate candle momentum
+        bias = "BUY" if last.close >= last.open else "SELL"
 
-    # Stop Loss and Take Profit Buffers based on volatility
-    sl_buffer = max(rng * 1.5, 2.5 if live_market_price > 100 else 0.0025)
-    tp_buffer = max(rng * 3.0, 5.0 if live_market_price > 100 else 0.0050)
+    sl_buffer = max(rng * 1.5, 2.0 if live_market_price > 100 else 0.0020)
+    tp_buffer = max(rng * 3.0, 4.0 if live_market_price > 100 else 0.0040)
 
     if bias == "BUY":
         sl = live_market_price - sl_buffer
@@ -209,7 +192,7 @@ def evaluate_price_lesson_supply_demand_strategy(df, live_market_price):
         sl = live_market_price + sl_buffer
         tp = live_market_price - tp_buffer
 
-    all_votes_str = f"Bullish Confluence [{b_score}]: {', '.join(bullish_votes) if bullish_votes else 'None'} | Bearish Confluence [{s_score}]: {', '.join(bearish_votes) if bearish_votes else 'None'}"
+    all_votes_str = f"Bullish [{b_score}]: {', '.join(bullish_votes) if bullish_votes else 'None'} | Bearish [{s_score}]: {', '.join(bearish_votes) if bearish_votes else 'None'}"
 
     return {
         "bias": bias,
@@ -236,25 +219,25 @@ def update_balance(con, delta):
 
 def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, market_status="OPEN", allow_weekend_practice=True):
     if market_status != "OPEN" and not allow_weekend_practice:
-        return False, "Market Closed! Enable Weekend Practice Mode in sidebar."
+        return False, "Market Closed!"
         
     cursor = con.cursor()
-    cursor.execute("SELECT id FROM tv_open_trades_v4 WHERE symbol = ?", (symbol,))
+    cursor.execute("SELECT id FROM tv_open_trades_v5 WHERE symbol = ?", (symbol,))
     if cursor.fetchone():
-        return False, "Active trade already exists for this symbol!"
+        return False, "Active trade already exists!"
         
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
-        "INSERT INTO tv_open_trades_v4 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO tv_open_trades_v5 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
     )
     con.commit()
-    return True, "Trade opened successfully!"
+    return True, "Trade opened!"
 
 def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v4 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v5 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
@@ -271,17 +254,17 @@ def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manua
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "INSERT INTO trade_history_v4 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trade_history_v5 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, 2 if is_gold else 5), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM tv_open_trades_v4 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v5 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
 def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True):
     cursor = con.cursor()
-    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_open_trades_v4")
+    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_open_trades_v5")
     open_trades = cursor.fetchall()
     
     tf_minutes = INTERVALS[timeframe_label]["minutes"]
@@ -325,29 +308,28 @@ def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True
         if closed:
             close_single_trade(con, tid, exit_p, is_gold=is_gold, reason=reason)
 
-# --- STREAMLIT UI DESIGN ---
-st.title("🪙 BIG MAN2 — Supply & Demand Price Action Bot")
-st.caption("Powered by TwelveData API, TwelveData/TradingView Sync, and Price Lesson Transcripts")
+# --- UI DESIGN ---
+st.title("🪙 BIG MAN2 — Price Action Bot")
+st.caption("TwelveData Live Integration & Instant Signal Execution")
 
 con = connect_db()
 m_status, m_text = get_forex_market_status()
 
 with st.sidebar:
-    st.header("⚙️ Control Center")
+    st.header("⚙️ Control Panel")
     symbol = st.selectbox("Select Asset", list(SYMBOLS.keys()), index=0)
     timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
     lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.01, step=0.01)
     
     if st.button("🔄 Refresh Market Data", use_container_width=True):
-        st.toast("Synced with TwelveData feed!", icon="🔄")
+        st.toast("Refreshed!", icon="🔄")
         st.rerun()
     
     st.markdown("---")
-    st.subheader("⚡ Execution Settings")
-    weekend_practice = st.checkbox("Allow Weekend Practice/Testing Mode", value=True)
-    auto_mode = st.toggle("Enable Auto-Pilot Bot", value=False)
+    weekend_practice = st.checkbox("Weekend Practice Mode", value=True)
+    auto_mode = st.toggle("Enable Auto-Pilot Bot", value=True) # Default True taaki turant trade le
     
-    if st.button("➕ Open New Trade Manually", use_container_width=True):
+    if st.button("➕ Open Manual Trade", use_container_width=True):
         df_temp, _ = get_market_data(symbol, timeframe)
         if not df_temp.empty:
             live_p = float(df_temp.close.iloc[-1])
@@ -362,16 +344,16 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🗑️ Clear All Trades & History", use_container_width=True):
-        con.execute("DELETE FROM tv_open_trades_v4")
-        con.execute("DELETE FROM trade_history_v4")
+        con.execute("DELETE FROM tv_open_trades_v5")
+        con.execute("DELETE FROM trade_history_v5")
         con.commit()
-        st.sidebar.success("Database cleared successfully!")
+        st.sidebar.success("Cleared!")
         st.rerun()
 
     if st.button("🔄 Reset Demo Balance ($500)", use_container_width=True):
         con.execute("UPDATE account_balance SET balance = 500.0 WHERE id = 1")
         con.commit()
-        st.sidebar.success("Balance reset to $500.00!")
+        st.sidebar.success("Reset to $500!")
         st.rerun()
 
 st.info(f"Market Status: **{m_text}**")
@@ -402,7 +384,7 @@ st.divider()
 left, right = st.columns([1.8, 1])
 
 with left:
-    st.subheader(f"📈 Live TradingView Chart ({symbol} - {timeframe})")
+    st.subheader(f"📈 Live Chart ({symbol} - {timeframe})")
     tv_symbol = SYMBOLS[symbol]["tv"]
     tv_int = INTERVALS[timeframe]["tv_int"]
     
@@ -414,61 +396,43 @@ with left:
     components.html(chart_html, height=495, scrolling=False)
 
 with right:
-    st.subheader("💡 Supply & Demand Confluence")
+    st.subheader("💡 Confluence Details")
     if not df.empty:
-        st.write(f"**Strategy Breakdown:** {result['votes']}")
+        st.write(f"**Breakdown:** {result['votes']}")
         fmt = ".2f" if "XAU" in symbol else ".5f"
         st.write(f"**Stop Loss:** `{result['sl']:{fmt}}` | **Take Profit:** `{result['tp']:{fmt}}`")
-        st.markdown(f"*Feed Source: {data_source}*")
-        st.markdown("---")
-        view = df.tail(4).copy()
-        view.index = view.index.strftime('%d %b %I:%M %p')
-        st.dataframe(view, use_container_width=True)
+        st.markdown(f"*Source: {data_source}*")
 
 st.divider()
-
 st.subheader("📋 Active Open Trades")
 
-open_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v4 ORDER BY id DESC",
-    con,
-)
+open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v5 ORDER BY id DESC", con)
 
 if open_df.empty:
     st.info("Abhi koi open trade nahi hai.")
 else:
     for index, row in open_df.iterrows():
         fmt = ".2f" if "XAU" in row['symbol'] else ".5f"
-        with st.expander(f"📌 Trade ID #{row['id']} | {row['symbol']} ({row['bias']} - {row['lot_size']} Lot) - TF: {row['timeframe']}"):
+        with st.expander(f"📌 Trade ID #{row['id']} | {row['symbol']} ({row['bias']} - {row['lot_size']} Lot)"):
             c1, c2 = st.columns(2)
-            c1.markdown(f"🕒 **Entry Time:** `{row['created_at_ist']}`\n📍 **Entry Price:** `{row['entry_price']:{fmt}}`\n🛑 **Stop Loss:** `{row['stop_loss']:{fmt}}`")
-            c2.markdown(f"🎯 **Take Profit:** `{row['take_profit']:{fmt}}`\n⚡ **Status:** `OPEN`\n📊 **Votes:** `{row['strategy_votes']}`")
-            
-            if st.button(f"Close Trade #{row['id']} Now", key=f"close_open_{row['id']}"):
+            c1.markdown(f"🕒 **Entry:** `{row['created_at_ist']}`\n📍 **Price:** `{row['entry_price']:{fmt}}`\n🛑 **SL:** `{row['stop_loss']:{fmt}}`")
+            c2.markdown(f"🎯 **TP:** `{row['take_profit']:{fmt}}`\n⚡ **Status:** `OPEN`")
+            if st.button(f"Close #{row['id']}", key=f"close_{row['id']}"):
                 current_p = float(df.close.iloc[-1]) if not df.empty else row['entry_price']
-                pnl_realized = close_single_trade(con, row['id'], current_p, is_gold=("XAU" in row['symbol']), reason="Manual Close 👤")
-                st.toast(f"Trade #{row['id']} closed! PnL: ${pnl_realized:+.2f}")
+                close_single_trade(con, row['id'], current_p, is_gold=("XAU" in row['symbol']), reason="Manual Close 👤")
                 st.rerun()
 
 st.divider()
-
-st.subheader("📜 Trade History (Permanent Storage)")
-
-history_df = pd.read_sql_query(
-    "SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, exit_reason, pnl, strategy_votes FROM trade_history_v4 ORDER BY id DESC LIMIT 50",
-    con,
-)
+st.subheader("📜 Trade History")
+history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, exit_reason, pnl, strategy_votes FROM trade_history_v5 ORDER BY id DESC LIMIT 50", con)
 
 if history_df.empty:
-    st.info("Abhi tak koi trade history me saved nahi hai.")
+    st.info("History khali hai.")
 else:
     for index, row in history_df.iterrows():
         pnl_color = "🟢" if row['pnl'] >= 0 else "🔴"
         fmt = ".2f" if "XAU" in row['symbol'] else ".5f"
-        with st.expander(f"{pnl_color} ID #{row['id']} | {row['symbol']} ({row['bias']}) | PnL: ${row['pnl']:+.2f} | Reason: {row['exit_reason']}"):
-            c1, c2 = st.columns(2)
-            c1.markdown(f"🕒 **Entry Time:** `{row['created_at_ist']}`\n🕒 **Exit Time:** `{row['closed_at_ist']}`\n⏱️ **Timeframe:** `{row['timeframe']}`\n📦 **Lot Size:** `{row['lot_size']}`")
-            c2.markdown(f"📍 **Entry Price:** `{row['entry_price']:{fmt}}`\n🏁 **Exit Price:** `{row['exit_price']:{fmt}}`\n🏷️ **Exit Reason:** `{row['exit_reason']}`\n💰 **Net PnL:** `${row['pnl']:+.2f}`")
-            st.markdown(f"📊 **Strategy Confluence at Entry:** `{row['strategy_votes']}`")
+        with st.expander(f"{pnl_color} ID #{row['id']} | {row['symbol']} ({row['bias']}) | PnL: ${row['pnl']:+.2f}"):
+            st.markdown(f"**PnL:** `${row['pnl']:+.2f}` | **Reason:** `{row['exit_reason']}`")
 
 con.close()
