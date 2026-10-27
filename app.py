@@ -7,10 +7,9 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 
-# Indian Standard Time (IST) Offset: UTC + 5:30
 IST = timezone(timedelta(hours=5, minutes=30))
 
-st.set_page_config(page_title="BIG MAN2 — Price Action Supply & Demand Bot", page_icon="🪙", layout="wide")
+st.set_page_config(page_title="BIG MAN2 — Price Action Bot", page_icon="🪙", layout="wide")
 
 DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_price_action_bot.db")
 
@@ -31,7 +30,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_open_trades_v5 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v6 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -47,7 +46,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v5 (
+        CREATE TABLE IF NOT EXISTS trade_history_v6 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -173,13 +172,11 @@ def evaluate_price_lesson_supply_demand_strategy(df, live_market_price):
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
 
-    # Smart Bias Decision (Tie-breaker included so bot never gets stuck)
     if b_score > s_score:
         bias = "BUY"
     elif s_score > b_score:
         bias = "SELL"
     else:
-        # Tie breaker based on immediate candle momentum
         bias = "BUY" if last.close >= last.open else "SELL"
 
     sl_buffer = max(rng * 1.5, 2.0 if live_market_price > 100 else 0.0020)
@@ -217,27 +214,9 @@ def update_balance(con, delta):
     con.commit()
     return new_bal
 
-def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, market_status="OPEN", allow_weekend_practice=True):
-    if market_status != "OPEN" and not allow_weekend_practice:
-        return False, "Market Closed!"
-        
-    cursor = con.cursor()
-    cursor.execute("SELECT id FROM tv_open_trades_v5 WHERE symbol = ?", (symbol,))
-    if cursor.fetchone():
-        return False, "Active trade already exists!"
-        
-    created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
-    entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    con.execute(
-        "INSERT INTO tv_open_trades_v5 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
-    )
-    con.commit()
-    return True, "Trade opened!"
-
 def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v5 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v6 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
@@ -254,17 +233,17 @@ def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manua
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "INSERT INTO trade_history_v5 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trade_history_v6 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, 2 if is_gold else 5), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM tv_open_trades_v5 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v6 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
 def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True):
     cursor = con.cursor()
-    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_open_trades_v5")
+    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_open_trades_v6")
     open_trades = cursor.fetchall()
     
     tf_minutes = INTERVALS[timeframe_label]["minutes"]
@@ -308,9 +287,35 @@ def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True
         if closed:
             close_single_trade(con, tid, exit_p, is_gold=is_gold, reason=reason)
 
+def manage_auto_trading(con, symbol, timeframe, result, lot_size, candle_ts, current_price, is_gold, market_status, allow_weekend_practice):
+    if market_status != "OPEN" and not allow_weekend_practice:
+        return
+
+    cursor = con.cursor()
+    cursor.execute("SELECT id, bias, entry_time_utc FROM tv_open_trades_v6 WHERE symbol = ?", (symbol,))
+    existing_trade = cursor.fetchone()
+
+    if existing_trade:
+        trade_id, existing_bias, entry_time_str = existing_trade
+        # Agar naye candle ka signal purane bias se alag hai, toh purani trade ko turant close karke naya signal lo!
+        if existing_bias != result["bias"]:
+            close_single_trade(con, trade_id, current_price, is_gold=is_gold, reason=f"Signal Reversal ({existing_bias} ➔ {result['bias']}) 🔄")
+            # Ab turant nayi trade open karo niche wale block se
+            existing_trade = None
+
+    # Agar koi trade open nahi hai, toh turant nayi trade lo
+    if not existing_trade:
+        created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
+        entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        con.execute(
+            "INSERT INTO tv_open_trades_v6 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
+        )
+        con.commit()
+
 # --- UI DESIGN ---
 st.title("🪙 BIG MAN2 — Price Action Bot")
-st.caption("TwelveData Live Integration & Instant Signal Execution")
+st.caption("Instant Signal Reversal & Live Execution Engine")
 
 con = connect_db()
 m_status, m_text = get_forex_market_status()
@@ -327,7 +332,7 @@ with st.sidebar:
     
     st.markdown("---")
     weekend_practice = st.checkbox("Weekend Practice Mode", value=True)
-    auto_mode = st.toggle("Enable Auto-Pilot Bot", value=True) # Default True taaki turant trade le
+    auto_mode = st.toggle("Enable Auto-Pilot Bot", value=True)
     
     if st.button("➕ Open Manual Trade", use_container_width=True):
         df_temp, _ = get_market_data(symbol, timeframe)
@@ -335,17 +340,14 @@ with st.sidebar:
             live_p = float(df_temp.close.iloc[-1])
             res_temp = evaluate_price_lesson_supply_demand_strategy(df_temp, live_p)
             candle_ts = df_temp.index[-1]
-            success, msg = execute_auto_trade(con, symbol, timeframe, res_temp, lot_size=lot_input, candle_ts=candle_ts, market_status=m_status, allow_weekend_practice=weekend_practice)
-            if success:
-                st.sidebar.success(f"Trade opened at {live_p:.2f}!")
-                st.rerun()
-            else:
-                st.sidebar.warning(msg)
+            manage_auto_trading(con, symbol, timeframe, res_temp, lot_size=lot_input, candle_ts=candle_ts, current_price=live_p, is_gold=("XAU" in symbol), market_status=m_status, allow_weekend_practice=weekend_practice)
+            st.sidebar.success("Manual Trade Processed!")
+            st.rerun()
 
     st.markdown("---")
     if st.button("🗑️ Clear All Trades & History", use_container_width=True):
-        con.execute("DELETE FROM tv_open_trades_v5")
-        con.execute("DELETE FROM trade_history_v5")
+        con.execute("DELETE FROM tv_open_trades_v6")
+        con.execute("DELETE FROM trade_history_v6")
         con.commit()
         st.sidebar.success("Cleared!")
         st.rerun()
@@ -365,10 +367,12 @@ if not df.empty:
     is_gold = "XAU" in symbol
     current_candle_ts = df.index[-1]
     
+    # 1. Check SL, TP, and Time Expiry
     check_auto_exit_conditions(con, current_live_price, timeframe, is_gold=is_gold)
     
-    if auto_mode and (m_status == "OPEN" or weekend_practice):
-        execute_auto_trade(con, symbol, timeframe, result, lot_size=lot_input, candle_ts=current_candle_ts, market_status=m_status, allow_weekend_practice=weekend_practice)
+    # 2. Auto-Pilot execution with instant signal reversal
+    if auto_mode:
+        manage_auto_trading(con, symbol, timeframe, result, lot_size=lot_input, candle_ts=current_candle_ts, current_price=current_live_price, is_gold=is_gold, market_status=m_status, allow_weekend_practice=weekend_practice)
 
     curr_balance = get_current_balance(con)
     bal_color = "🟢" if curr_balance >= 500 else "🔴"
@@ -406,7 +410,7 @@ with right:
 st.divider()
 st.subheader("📋 Active Open Trades")
 
-open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v5 ORDER BY id DESC", con)
+open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v6 ORDER BY id DESC", con)
 
 if open_df.empty:
     st.info("Abhi koi open trade nahi hai.")
@@ -417,14 +421,14 @@ else:
             c1, c2 = st.columns(2)
             c1.markdown(f"🕒 **Entry:** `{row['created_at_ist']}`\n📍 **Price:** `{row['entry_price']:{fmt}}`\n🛑 **SL:** `{row['stop_loss']:{fmt}}`")
             c2.markdown(f"🎯 **TP:** `{row['take_profit']:{fmt}}`\n⚡ **Status:** `OPEN`")
-            if st.button(f"Close #{row['id']}", key=f"close_{row['id']}"):
+            if st.button(f"Close #{row['id']}", key=f"close_{row['id']}:"):
                 current_p = float(df.close.iloc[-1]) if not df.empty else row['entry_price']
                 close_single_trade(con, row['id'], current_p, is_gold=("XAU" in row['symbol']), reason="Manual Close 👤")
                 st.rerun()
 
 st.divider()
 st.subheader("📜 Trade History")
-history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, exit_reason, pnl, strategy_votes FROM trade_history_v5 ORDER BY id DESC LIMIT 50", con)
+history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, exit_reason, pnl, strategy_votes FROM trade_history_v6 ORDER BY id DESC LIMIT 50", con)
 
 if history_df.empty:
     st.info("History khali hai.")
