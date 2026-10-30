@@ -149,21 +149,25 @@ def evaluate_price_lesson_supply_demand_strategy(df, live_market_price):
     bullish_votes = []
     bearish_votes = []
 
+    # 1. Premium & Discount Zone Rules (S7 Model)
     if live_market_price < eq_50:
-        bullish_votes.append("Discount Zone (Buy Bias)")
+        bullish_votes.append("Discount Zone (< 0.5 Eq)")
     else:
-        bearish_votes.append("Premium Zone (Sell Bias)")
+        bearish_votes.append("Premium Zone (> 0.5 Eq)")
 
+    # 2. Fair Value Gap (FVG) Check (S5-FVG Model)
     if last.low > p_prev.high and prev.close > prev.open:
         bullish_votes.append("Bullish FVG")
     elif last.high < p_prev.low and prev.close < prev.open:
         bearish_votes.append("Bearish FVG")
 
-    if lower_wick >= body * 1.2 and last.close > last.open:
+    # 3. Supply & Demand Rejection Wicks
+    if lower_wick >= body * 1.0 and last.close > last.open:
         bullish_votes.append("Demand Rejection")
-    elif upper_wick >= body * 1.2 and last.close < last.open:
+    elif upper_wick >= body * 1.0 and last.close < last.open:
         bearish_votes.append("Supply Rejection")
 
+    # 4. Engulfing / Candle Momentum Pattern
     if last.close > last.open and prev.close < prev.open:
         bullish_votes.append("Bullish Engulfing")
     elif last.close < last.open and prev.close > prev.open:
@@ -172,6 +176,7 @@ def evaluate_price_lesson_supply_demand_strategy(df, live_market_price):
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
 
+    # STRICT SCORE-BASED BIAS (No forced counter-trend overrides)
     if b_score > s_score:
         bias = "BUY"
     elif s_score > b_score:
@@ -273,7 +278,6 @@ def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True
                 reason = "SL Hitter 🛑"
                 closed = True
                 
-        # Time expiry check based on timeframe
         if not closed and tf == timeframe_label:
             try:
                 entry_dt = datetime.strptime(entry_time_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
@@ -293,12 +297,10 @@ def manage_auto_trading(con, symbol, timeframe, result, lot_size, candle_ts, cur
         return
 
     cursor = con.cursor()
-    # Check if a trade was ALREADY opened for THIS exact candle timestamp (Prevents duplicate trade on the same candle)
     cursor.execute("SELECT id FROM tv_open_trades_v7 WHERE symbol = ? AND candle_timestamp = ?", (symbol, str(candle_ts)))
     existing_on_this_candle = cursor.fetchone()
 
     if not existing_on_this_candle:
-        # Open a new trade without killing existing active trades (Allows multiple trades over time/candles)
         created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
         entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         con.execute(
@@ -309,7 +311,7 @@ def manage_auto_trading(con, symbol, timeframe, result, lot_size, candle_ts, cur
 
 # --- UI DESIGN ---
 st.title("🪙 BIG MAN2 — Price Action Bot")
-st.caption("Multiple Trades Allowed per Session | No Same-Candle Duplicates")
+st.caption("Strict S&D Confluence • Multi-Trade Enabled • Real-Time Price Action")
 
 con = connect_db()
 m_status, m_text = get_forex_market_status()
@@ -361,10 +363,8 @@ if not df.empty:
     is_gold = "XAU" in symbol
     current_candle_ts = df.index[-1]
     
-    # 1. Check TP, SL and Time Expiry for all active trades independently
     check_auto_exit_conditions(con, current_live_price, timeframe, is_gold=is_gold)
     
-    # 2. Auto-Pilot execution: Allows multiple active trades across different candles, prevents same-candle duplicates
     if auto_mode:
         manage_auto_trading(con, symbol, timeframe, result, lot_size=lot_input, candle_ts=current_candle_ts, current_price=current_live_price, is_gold=is_gold, market_status=m_status, allow_weekend_practice=weekend_practice)
 
