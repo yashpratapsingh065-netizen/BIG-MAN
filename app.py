@@ -9,7 +9,7 @@ import requests
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-st.set_page_config(page_title="BIG MAN2 — MT5 & Price Action Bot", page_icon="🪙", layout="wide")
+st.set_page_config(page_title="BIG MAN2 — Optimized Price Action Bot", page_icon="🪙", layout="wide")
 
 DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_price_action_bot.db")
 
@@ -30,7 +30,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_open_trades_v7 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v8 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -46,7 +46,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v7 (
+        CREATE TABLE IF NOT EXISTS trade_history_v8 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -94,8 +94,6 @@ def get_forex_market_status():
 def get_market_data(symbol_label, interval_label, rows=300):
     info = SYMBOLS[symbol_label]
     cfg = INTERVALS[interval_label]
-    
-    # Reading Twelve Data API Key from Streamlit Secrets
     td_key = st.secrets.get("TWELVE_DATA_API_KEY", os.getenv("TWELVE_DATA_API_KEY", ""))
     
     if td_key:
@@ -119,7 +117,6 @@ def get_market_data(symbol_label, interval_label, rows=300):
         except Exception:
             pass
 
-    # Fallback to Yahoo Finance if needed
     try:
         import yfinance as yf
         ticker = yf.Ticker(info["yf"])
@@ -136,7 +133,7 @@ def get_market_data(symbol_label, interval_label, rows=300):
 
 def evaluate_price_lesson_supply_demand_strategy(df, live_market_price):
     if len(df) < 30:
-        return {"bias":"BUY", "votes":"Default safe bias", "bullish":1, "bearish":0, "entry":live_market_price, "sl":live_market_price*0.99, "tp":live_market_price*1.02}
+        return {"bias":"HOLD", "votes":"Insufficient data", "bullish":0, "bearish":0, "entry":live_market_price, "sl":live_market_price, "tp":live_market_price}
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -181,22 +178,27 @@ def evaluate_price_lesson_supply_demand_strategy(df, live_market_price):
     b_score = len(bullish_votes)
     s_score = len(bearish_votes)
 
-    if b_score > s_score:
+    # STRICT FILTER: Minimum 2 confluence votes required to take a trade (Avoids weak random entries)
+    if b_score >= 2 and b_score > s_score:
         bias = "BUY"
-    elif s_score > b_score:
+    elif s_score >= 2 and s_score > b_score:
         bias = "SELL"
     else:
-        bias = "BUY" if last.close >= last.open else "SELL"
+        bias = "HOLD"
 
-    sl_buffer = max(rng * 1.5, 2.0 if live_market_price > 100 else 0.0020)
-    tp_buffer = max(rng * 3.0, 4.0 if live_market_price > 100 else 0.0040)
+    # OPTIMIZED RISK-TO-REWARD (SL chhota, TP bada - 1:2.5 RRR)
+    sl_buffer = max(rng * 1.2, 2.5 if live_market_price > 100 else 0.0015)
+    tp_buffer = sl_buffer * 2.5
 
     if bias == "BUY":
         sl = live_market_price - sl_buffer
         tp = live_market_price + tp_buffer
-    else:
+    elif bias == "SELL":
         sl = live_market_price + sl_buffer
         tp = live_market_price - tp_buffer
+    else:
+        sl = live_market_price
+        tp = live_market_price
 
     all_votes_str = f"Bullish [{b_score}]: {', '.join(bullish_votes) if bullish_votes else 'None'} | Bearish [{s_score}]: {', '.join(bearish_votes) if bearish_votes else 'None'}"
 
@@ -225,7 +227,7 @@ def update_balance(con, delta):
 
 def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v7 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v8 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
@@ -242,17 +244,17 @@ def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manua
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "INSERT INTO trade_history_v7 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trade_history_v8 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, 2 if is_gold else 5), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM tv_open_trades_v7 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v8 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
 def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True):
     cursor = con.cursor()
-    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_open_trades_v7")
+    cursor.execute("SELECT id, symbol, timeframe, bias, entry_price, stop_loss, take_profit, lot_size, entry_time_utc FROM tv_open_trades_v8")
     open_trades = cursor.fetchall()
     
     tf_minutes = INTERVALS[timeframe_label]["minutes"]
@@ -299,23 +301,25 @@ def check_auto_exit_conditions(con, current_price, timeframe_label, is_gold=True
 def manage_auto_trading(con, symbol, timeframe, result, lot_size, candle_ts, current_price, is_gold, market_status, allow_weekend_practice):
     if market_status != "OPEN" and not allow_weekend_practice:
         return
+    if result["bias"] == "HOLD":
+        return  # Do not enter trade if confluence score is weak
 
     cursor = con.cursor()
-    cursor.execute("SELECT id FROM tv_open_trades_v7 WHERE symbol = ? AND candle_timestamp = ?", (symbol, str(candle_ts)))
+    cursor.execute("SELECT id FROM tv_open_trades_v8 WHERE symbol = ? AND candle_timestamp = ?", (symbol, str(candle_ts)))
     existing_on_this_candle = cursor.fetchone()
 
     if not existing_on_this_candle:
         created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
         entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         con.execute(
-            "INSERT INTO tv_open_trades_v7 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tv_open_trades_v8 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
         )
         con.commit()
 
 # --- UI DESIGN ---
-st.title("🪙 BIG MAN2 — Price Action Bot")
-st.caption("MetaQuotes-Demo (5058003871) • Twelve Data Live Feed • Multiple Trades Allowed")
+st.title("🪙 BIG MAN2 — Optimized Risk-Reward Bot")
+st.caption("MetaQuotes-Demo (5058003871) • Strict 2+ Confluence Filter • 1:2.5 RRR")
 
 con = connect_db()
 m_status, m_text = get_forex_market_status()
@@ -351,8 +355,8 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🗑️ Clear All Trades & History", use_container_width=True):
-        con.execute("DELETE FROM tv_open_trades_v7")
-        con.execute("DELETE FROM trade_history_v7")
+        con.execute("DELETE FROM tv_open_trades_v8")
+        con.execute("DELETE FROM trade_history_v8")
         con.commit()
         st.sidebar.success("Cleared!")
         st.rerun()
@@ -412,17 +416,17 @@ with right:
 st.divider()
 st.subheader("📋 Active Open Trades")
 
-open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v7 ORDER BY id DESC", con)
+open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v8 ORDER BY id DESC", con)
 
 if open_df.empty:
-    st.info("Abhi koi open trade nahi hai.")
+    st.info("Abhi koi open trade nahi hai (Waiting for strong 2+ confluence setup).")
 else:
     for index, row in open_df.iterrows():
         fmt = ".2f" if "XAU" in row['symbol'] else ".5f"
         with st.expander(f"📌 Trade ID #{row['id']} | {row['symbol']} ({row['bias']} - {row['lot_size']} Lot)"):
             c1, c2 = st.columns(2)
             c1.markdown(f"🕒 **Entry:** `{row['created_at_ist']}`\n📍 **Price:** `{row['entry_price']:{fmt}}`\n🛑 **SL:** `{row['stop_loss']:{fmt}}`")
-            c2.markdown(f"🎯 **TP:** `{row['take_profit']:{fmt}}`\n⚡ **Status:** `OPEN`")
+            c2.markdown(f"🎯 **TP:** `{row['take_profit']:{fmt}}`\n⚡ **Status:** `OPTIMIZED`")
             if st.button(f"Close #{row['id']}", key=f"close_{row['id']}"):
                 current_p = current_live_price if current_live_price > 0 else row['entry_price']
                 close_single_trade(con, row['id'], current_p, is_gold=("XAU" in row['symbol']), reason="Manual Close 👤")
@@ -430,7 +434,7 @@ else:
 
 st.divider()
 st.subheader("📜 Trade History")
-history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, exit_reason, pnl, strategy_votes FROM trade_history_v7 ORDER BY id DESC LIMIT 50", con)
+history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, entry_price, exit_price, exit_reason, pnl, strategy_votes FROM trade_history_v8 ORDER BY id DESC LIMIT 50", con)
 
 if history_df.empty:
     st.info("History khali hai.")
