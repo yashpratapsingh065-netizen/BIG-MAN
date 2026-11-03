@@ -9,9 +9,9 @@ import requests
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-st.set_page_config(page_title="BIG MAN2 — Self-Optimizing Price Lesson Master Bot", page_icon="🪙", layout="wide")
+st.set_page_config(page_title="BIG MAN2 — Multi-Section Timeframe Master Bot", page_icon="🪙", layout="wide")
 
-DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_price_action_bot_v13.db")
+DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_price_action_bot_v14.db")
 
 SYMBOLS = {
     "XAU/USD (Gold)": {"tv": "OANDA:XAUUSD", "td": "XAU/USD", "yf": "GC=F", "mt5": "XAUUSD"},
@@ -29,7 +29,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_open_trades_v13 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v14 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -45,7 +45,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v13 (
+        CREATE TABLE IF NOT EXISTS trade_history_v14 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -116,11 +116,7 @@ def get_market_data(symbol_label, interval_td, rows=200):
     return pd.DataFrame(), 0.0
 
 def run_sqlite_backtest_optimization(con, symbol_label):
-    """
-    Analyzes SQLite past trade history to calculate win rate and adjust strategy bias weights.
-    Provides self-learning optimization based on previous market behavior.
-    """
-    df_hist = pd.read_sql_query("SELECT bias, pnl, exit_reason FROM trade_history_v13 WHERE symbol = ?", con, params=(symbol_label,))
+    df_hist = pd.read_sql_query("SELECT bias, pnl, exit_reason FROM trade_history_v14 WHERE symbol = ?", con, params=(symbol_label,))
     if df_hist.empty:
         return {"win_rate": 0.0, "total_trades": 0, "penalty_bias": "NEUTRAL"}
     
@@ -128,18 +124,16 @@ def run_sqlite_backtest_optimization(con, symbol_label):
     wins = len(df_hist[df_hist["pnl"] > 0])
     win_rate = (wins / total) * 100 if total > 0 else 0.0
     
-    # If recent trades resulted in SL hits, penalize that direction temporarily
     recent_losses = df_hist.tail(3)
     penalty = "NEUTRAL"
     if len(recent_losses[recent_losses["exit_reason"].str.contains("SL")]) >= 2:
-        last_bias = recent_losses.iloc[-1]["bias"]
-        penalty = last_bias  # Avoid repeating failing bias immediately
+        penalty = recent_losses.iloc[-1]["bias"]
         
     return {"win_rate": win_rate, "total_trades": total, "penalty_bias": penalty}
 
-def analyze_multi_timeframe_matrix(symbol_label):
+def analyze_all_timeframe_matrix(symbol_label):
     biases = {}
-    tf_mapping = {"15m": "15min", "1h": "1h", "4h": "240min", "1D": "1day"}
+    tf_mapping = {"15 min": "15min", "1 hour": "1h", "4 hours": "240min", "1 day": "1day"}
     for label, td_val in tf_mapping.items():
         df, _ = get_market_data(symbol_label, td_val, rows=50)
         if not df.empty and len(df) >= 10:
@@ -174,25 +168,21 @@ def evaluate_price_lesson_strategy(df_current, live_market_price, mtf_biases, ba
     bullish_votes = []
     bearish_votes = []
 
-    # 1. 50% Equilibrium & Discount/Premium Zone
     if live_market_price < eq_50:
         bullish_votes.append("Discount Zone (< 0.5 Eq)")
     else:
         bearish_votes.append("Premium Zone (> 0.5 Eq)")
 
-    # 2. Fair Value Gap (FVG) Check
     if last.low > p_prev.high and prev.close > prev.open:
         bullish_votes.append("Bullish FVG")
     elif last.high < p_prev.low and prev.close < prev.open:
         bearish_votes.append("Bearish FVG")
 
-    # 3. Supply & Demand Rejection Wicks (>= 1.3 ratio rule)
     if lower_wick >= body * 1.3 and last.close > last.open:
         bullish_votes.append("Demand Rejection")
     elif upper_wick >= body * 1.3 and last.close < last.open:
         bullish_votes.append("Supply Rejection")
 
-    # 4. Candlestick Engulfing Pattern
     if last.close > last.open and prev.close < prev.open:
         bullish_votes.append("Bullish Engulfing")
     elif last.close < last.open and prev.close > prev.open:
@@ -204,26 +194,18 @@ def evaluate_price_lesson_strategy(df_current, live_market_price, mtf_biases, ba
     local_bias = "HOLD"
     if b_score >= 1 and b_score > s_score:
         local_bias = "BUY"
-    elif s_score >= 1 and s_score > s_score: # corrected logic
-        local_bias = "SELL"
     elif s_score >= 1 and s_score > b_score:
         local_bias = "SELL"
 
-    # Strict Multi-Timeframe Harmonization & Backtest Penalty Filter
-    m15 = mtf_biases.get("15m", "NEUTRAL")
-    h1 = mtf_biases.get("1h", "NEUTRAL")
-    h4 = mtf_biases.get("4h", "NEUTRAL")
-    d1 = mtf_biases.get("1D", "NEUTRAL")
+    # Count how many timeframes agree (at least 2 matching)
+    buy_matches = sum(1 for tf, b in mtf_biases.items() if b == "BUY")
+    sell_matches = sum(1 for tf, b in mtf_biases.items() if b == "SELL")
 
     final_bias = "HOLD"
-    
-    # If local signals agree with HTF and no backtest recent loss penalty exists
-    if local_bias == "BUY" and backtest_insights["penalty_bias"] != "BUY":
-        if m15 != "SELL" and h1 != "SELL":
-            final_bias = "BUY"
-    elif local_bias == "SELL" and backtest_insights["penalty_bias"] != "SELL":
-        if m15 != "BUY" and h1 != "BUY":
-            final_bias = "SELL"
+    if local_bias == "BUY" and buy_matches >= 2 and backtest_insights["penalty_bias"] != "BUY":
+        final_bias = "BUY"
+    elif local_bias == "SELL" and sell_matches >= 2 and backtest_insights["penalty_bias"] != "SELL":
+        final_bias = "SELL"
 
     sl_buffer = max(rng * 1.2, 2.5 if is_gold else 0.0015)
     tp_buffer = sl_buffer * 2.5
@@ -238,8 +220,8 @@ def evaluate_price_lesson_strategy(df_current, live_market_price, mtf_biases, ba
         sl = live_market_price
         tp = live_market_price
 
-    mtf_str = f"15m:{m15} | 1h:{h1} | 4h:{h4} | 1D:{d1}"
-    votes_str = f"MTF Matrix [{mtf_str}] | Bull [{b_score}]: {', '.join(bullish_votes)} | Bear [{s_score}]: {', '.join(bearish_votes)}"
+    mtf_str = " | ".join([f"{k}:{v}" for k, v in mtf_biases.items()])
+    votes_str = f"Matrix [{mtf_str}] | Bull [{b_score}]: {', '.join(bullish_votes)} | Bear [{s_score}]: {', '.join(bearish_votes)}"
     decimals = 2 if is_gold else 5
 
     return {
@@ -267,7 +249,7 @@ def update_balance(con, delta):
 
 def close_single_trade(con, trade_id, current_price, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v13 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v14 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
@@ -282,17 +264,17 @@ def close_single_trade(con, trade_id, current_price, reason="Manual Close 👤")
     decimals = 2 if is_gold else 5
     
     con.execute(
-        "INSERT INTO trade_history_v13 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trade_history_v14 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, decimals), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM tv_open_trades_v13 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v14 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
 def check_auto_exit_conditions(con, symbol_label, current_price):
     cursor = con.cursor()
-    cursor.execute("SELECT id, bias, stop_loss, take_profit FROM tv_open_trades_v13 WHERE symbol = ?", (symbol_label,))
+    cursor.execute("SELECT id, bias, stop_loss, take_profit FROM tv_open_trades_v14 WHERE symbol = ?", (symbol_label,))
     open_trades = cursor.fetchall()
     
     for tid, bias, sl, tp in open_trades:
@@ -319,19 +301,19 @@ def manage_auto_trading(con, symbol, timeframe_label, result, lot_size, candle_t
         return
 
     cursor = con.cursor()
-    cursor.execute("SELECT id FROM tv_open_trades_v13 WHERE symbol = ? AND candle_timestamp = ?", (symbol, str(candle_ts)))
+    cursor.execute("SELECT id FROM tv_open_trades_v14 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe_label, str(candle_ts)))
     if not cursor.fetchone():
         created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
         entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         con.execute(
-            "INSERT INTO tv_open_trades_v13 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tv_open_trades_v14 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (created_at_ist, symbol, timeframe_label, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
         )
         con.commit()
 
 # --- UI INTERFACE ---
-st.title("🪙 BIG MAN2 — Self-Optimizing Price Lesson Bot")
-st.caption("MetaQuotes-Demo (5058003871) • SQLite Backtesting & Learning Engine • 1:2.5 RRR")
+st.title("🪙 BIG MAN2 — Multi-Section Timeframe Bot")
+st.caption("MetaQuotes-Demo (5058003871) • 2+ Timeframe Harmony & Isolated Sections • 1:2.5 RRR")
 
 con = connect_db()
 m_status, m_text = get_forex_market_status()
@@ -339,18 +321,18 @@ m_status, m_text = get_forex_market_status()
 with st.sidebar:
     st.header("⚙️ Control Panel")
     symbol = st.selectbox("Select Asset", list(SYMBOLS.keys()), index=0)
-    timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=0)
+    timeframe = st.selectbox("Active Chart Timeframe", list(INTERVALS.keys()), index=0)
     lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.01, step=0.01)
     
     if st.button("🔄 Refresh Data", use_container_width=True):
         st.rerun()
     
-    auto_mode = st.toggle("Enable Master Auto-Pilot", value=True)
+    auto_mode = st.toggle("Enable Multi-TF Auto-Pilot", value=True)
     is_gold = "XAU" in symbol
     
     cfg = INTERVALS[timeframe]
     df_temp, live_p_temp = get_market_data(symbol, cfg["td"], rows=150)
-    mtf_biases_temp = analyze_multi_timeframe_matrix(symbol)
+    mtf_biases_temp = analyze_all_timeframe_matrix(symbol)
     backtest_insights_temp = run_sqlite_backtest_optimization(con, symbol)
     
     if st.button("➕ Force Manual Trade", use_container_width=True):
@@ -358,14 +340,14 @@ with st.sidebar:
             res_temp = evaluate_price_lesson_strategy(df_temp, live_p_temp, mtf_biases_temp, backtest_insights_temp, is_gold)
             if res_temp["bias"] != "HOLD":
                 manage_auto_trading(con, symbol, timeframe, res_temp, lot_input, df_temp.index[-1], m_status)
-                st.sidebar.success(f"Trade Placed: {res_temp['bias']}!")
+                st.sidebar.success(f"Trade Placed on {timeframe}: {res_temp['bias']}!")
             else:
-                st.sidebar.warning("Blocked! Market conditions or backtest penalty active.")
+                st.sidebar.warning("Blocked! Need at least 2 matching timeframes.")
             st.rerun()
 
     if st.button("🗑️ Clear All Trades & History", use_container_width=True):
-        con.execute("DELETE FROM tv_open_trades_v13")
-        con.execute("DELETE FROM trade_history_v13")
+        con.execute("DELETE FROM tv_open_trades_v14")
+        con.execute("DELETE FROM trade_history_v14")
         con.commit()
         st.rerun()
 
@@ -373,7 +355,7 @@ st.info(f"Market Status: **{m_text}**")
 
 cfg = INTERVALS[timeframe]
 df_current, current_live_price = get_market_data(symbol, cfg["td"], rows=150)
-mtf_biases = analyze_multi_timeframe_matrix(symbol)
+mtf_biases = analyze_all_timeframe_matrix(symbol)
 backtest_insights = run_sqlite_backtest_optimization(con, symbol)
 is_gold = "XAU" in symbol
 
@@ -392,8 +374,8 @@ if not df_current.empty and current_live_price > 0:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Live Price", f"{current_live_price:.2f}" if is_gold else f"{current_live_price:.5f}")
     col2.metric("Backtest Win Rate", f"{backtest_insights['win_rate']:.1f}% ({backtest_insights['total_trades']} trades)")
-    col3.metric("Signal Bias", result["bias"])
-    col4.metric("Confluence Score", f"Bull: {result['bullish']} | Bear: {result['bearish']}")
+    col3.metric("TF Matrix Harmony", f"15m:{mtf_biases.get('15 min')} | 1h:{mtf_biases.get('1 hour')} | 4h:{mtf_biases.get('4 hours')} | 1D:{mtf_biases.get('1 day')}")
+    col4.metric("Active Signal", result["bias"])
 
 st.divider()
 left, right = st.columns([1.8, 1])
@@ -410,37 +392,50 @@ with left:
     components.html(chart_html, height=495, scrolling=False)
 
 with right:
-    st.subheader("💡 SQLite Backtest & MTF Insights")
+    st.subheader("💡 Price Lesson Breakdown")
     if not df_current.empty:
         st.write(f"**Analysis:** {result['votes']}")
-        st.write(f"**Self-Learning Penalty:** `{backtest_insights['penalty_bias']}`")
         fmt = ".2f" if is_gold else ".5f"
         st.write(f"**Stop Loss:** `{result['sl']:{fmt}}` | **Take Profit:** `{result['tp']:{fmt}}`")
 
 st.divider()
-st.subheader("📋 Active Open Trades")
-open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v13 ORDER BY id DESC", con)
+st.subheader("📂 Dedicated Timeframe Sections (Active Trades & History)")
 
-if open_df.empty:
-    st.info("कोई ट्रेड ओपन नहीं है (बोट बैकटेस्ट और मल्टी-टाइमframe मैट्रिक्स के आधार पर परफेक्ट सेटअप का इंतज़ार कर रहा है)।")
-else:
-    for index, row in open_df.iterrows():
-        row_gold = "XAU" in row['symbol']
-        fmt = ".2f" if row_gold else ".5f"
-        with st.expander(f"📌 Trade #{row['id']} | {row['symbol']} ({row['timeframe']} - {row['bias']})"):
-            st.markdown(f"**Entry:** `{row['entry_price']:{fmt}}` | **SL:** `{row['stop_loss']:{fmt}}` | **TP:** `{row['take_profit']:{fmt}}`")
-            if st.button(f"Close #{row['id']}", key=f"cl_{row['id']}"):
-                close_single_trade(con, row['id'], current_live_price, reason="Manual Close")
-                st.rerun()
+# Create separate tabs for each timeframe section
+tab_15m, tab_1h, tab_4h, tab_1d = st.tabs(["⏱️ 15 Min Section", "⏰ 1 Hour Section", "📅 4 Hours Section", "🗓️ 1 Day Section"])
 
-st.divider()
-st.subheader("📜 Trade History & Learning Log")
-history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, pnl, exit_reason FROM trade_history_v13 ORDER BY id DESC LIMIT 30", con)
-if history_df.empty:
-    st.info("इतिहास खाली है।")
-else:
-    for index, row in history_df.iterrows():
-        color = "🟢" if row['pnl'] >= 0 else "🔴"
-        st.markdown(f"{color} **ID #{row['id']}** | {row['symbol']} ({row['timeframe']} - {row['bias']}) | PnL: `${row['pnl']:+.2f}` | Reason: `{row['exit_reason']}`")
+tf_tabs_mapping = {
+    "⏱️ 15 Min Section": "15 min",
+    "⏰ 1 Hour Section": "1 hour",
+    "📅 4 Hours Section": "4 hours",
+    "🗓️ 1 Day Section": "1 day"
+}
+
+for tab_obj, tf_name in zip([tab_15m, tab_1h, tab_4h, tab_1d], tf_tabs_mapping.values()):
+    with tab_obj:
+        st.markdown(f"### 📌 {tf_name} Active Trades")
+        open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v14 WHERE symbol = ? AND timeframe = ? ORDER BY id DESC", con, params=(symbol, tf_name))
+        
+        if open_df.empty:
+            st.info(f"[{tf_name}] कोई सक्रिय ट्रेड नहीं है।")
+        else:
+            for index, row in open_df.iterrows():
+                row_gold = "XAU" in symbol
+                fmt = ".2f" if row_gold else ".5f"
+                with st.expander(f"Trade #{row['id']} | {row['bias']} ({row['lot_size']} Lot)"):
+                    st.markdown(f"**Entry:** `{row['entry_price']:{fmt}}` | **SL:** `{row['stop_loss']:{fmt}}` | **TP:** `{row['take_profit']:{fmt}}`")
+                    if st.button(f"Close #{row['id']}", key=f"cl_{tf_name}_{row['id']}"):
+                        close_single_trade(con, row['id'], current_live_price, reason="Manual Close")
+                        st.rerun()
+                        
+        st.markdown(f"### 📜 {tf_name} Trade History")
+        hist_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, bias, pnl, exit_reason FROM trade_history_v14 WHERE symbol = ? AND timeframe = ? ORDER BY id DESC LIMIT 20", con, params=(symbol, tf_name))
+        
+        if hist_df.empty:
+            st.info(f"[{tf_name}] इतिहास खाली है।")
+        else:
+            for index, row in hist_df.iterrows():
+                color = "🟢" if row['pnl'] >= 0 else "🔴"
+                st.markdown(f"{color} **ID #{row['id']}** ({row['bias']}) | PnL: `${row['pnl']:+.2f}` | Reason: `{row['exit_reason']}`")
 
 con.close()
