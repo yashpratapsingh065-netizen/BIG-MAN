@@ -9,7 +9,7 @@ import requests
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-st.set_page_config(page_title="BIG MAN2 — Multi-Timeframe Master Bot", page_icon="🪙", layout="wide")
+st.set_page_config(page_title="BIG MAN2 — Strict Multi-Timeframe Bot", page_icon="🪙", layout="wide")
 
 DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_price_action_bot.db")
 
@@ -20,7 +20,7 @@ SYMBOLS = {
 }
 
 INTERVALS = {
-    "15 min": {"td": "15min", "yf": "15m", "tv_int": "15", "minutes": 15},
+    "15 min": {"td": "15min", "yf": "5m", "tv_int": "15", "minutes": 5},
     "1 hour": {"td": "1h", "yf": "60m", "tv_int": "60", "minutes": 60},
     "4 hours": {"td": "240min", "yf": "1h", "tv_int": "240", "minutes": 240},
     "1 day": {"td": "1day", "yf": "1d", "tv_int": "D", "minutes": 1440}
@@ -29,7 +29,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_open_trades_v11 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v12 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -45,7 +45,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v11 (
+        CREATE TABLE IF NOT EXISTS trade_history_v12 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -116,9 +116,6 @@ def get_market_data(symbol_label, interval_td, rows=150):
     return pd.DataFrame(), 0.0
 
 def analyze_multi_timeframe_bias(symbol_label):
-    """
-    Fetches 15m, 1h, 4h, and 1D data to determine comprehensive institutional bias.
-    """
     biases = {}
     tf_mapping = {"15m": "15min", "1h": "1h", "4h": "240min", "1D": "1day"}
     
@@ -157,25 +154,21 @@ def evaluate_price_lesson_strategy(df_current, live_market_price, mtf_biases, is
     bullish_votes = []
     bearish_votes = []
 
-    # 1. Premium / Discount Zone (S5/S6)
     if live_market_price < eq_50:
         bullish_votes.append("Discount Zone (< 0.5 Eq)")
     else:
         bearish_votes.append("Premium Zone (> 0.5 Eq)")
 
-    # 2. Fair Value Gap (FVG) Check (S5-FVG)
     if last.low > p_prev.high and prev.close > prev.open:
         bullish_votes.append("Bullish FVG")
     elif last.high < p_prev.low and prev.close < prev.open:
         bearish_votes.append("Bearish FVG")
 
-    # 3. Supply & Demand Rejection Wicks (>= 1.3 ratio rule)
     if lower_wick >= body * 1.3 and last.close > last.open:
         bullish_votes.append("Demand Rejection")
     elif upper_wick >= body * 1.3 and last.close < last.open:
         bullish_votes.append("Supply Rejection")
 
-    # 4. Candlestick Engulfing Pattern (S3)
     if last.close > last.open and prev.close < prev.open:
         bullish_votes.append("Bullish Engulfing")
     elif last.close < last.open and prev.close > prev.open:
@@ -190,16 +183,18 @@ def evaluate_price_lesson_strategy(df_current, live_market_price, mtf_biases, is
     elif s_score >= 2 and s_score > b_score:
         local_bias = "SELL"
 
-    # Multi-Timeframe Alignment Check (15m, 1h, 4h, 1D)
-    h4_bias = mtf_biases.get("4h", "NEUTRAL")
-    d1_bias = mtf_biases.get("1D", "NEUTRAL")
+    # STRICT HARMONIZATION: If ANY major timeframe (15m, 1h, 4h) is opposing, block the trade!
+    m15_t = mtf_biases.get("15m", "NEUTRAL")
+    h1_t = mtf_biases.get("1h", "NEUTRAL")
+    h4_t = mtf_biases.get("4h", "NEUTRAL")
 
     final_bias = "HOLD"
-    # Strict rule: Do not trade against 4H and 1D major trend
-    if local_bias == "BUY" and h4_bias in ["BUY", "NEUTRAL"] and d1_bias in ["BUY", "NEUTRAL"]:
-        final_bias = "BUY"
-    elif local_bias == "SELL" and h4_bias in ["SELL", "NEUTRAL"] and d1_bias in ["SELL", "NEUTRAL"]:
-        final_bias = "SELL"
+    if local_bias == "BUY":
+        if m15_t != "SELL" and h1_t != "SELL" and h4_t != "SELL":
+            final_bias = "BUY"
+    elif local_bias == "SELL":
+        if m15_t != "BUY" and h1_t != "BUY" and h4_t != "BUY":
+            final_bias = "SELL"
 
     sl_buffer = max(rng * 1.2, 2.5 if is_gold else 0.0015)
     tp_buffer = sl_buffer * 2.5
@@ -214,7 +209,7 @@ def evaluate_price_lesson_strategy(df_current, live_market_price, mtf_biases, is
         sl = live_market_price
         tp = live_market_price
 
-    mtf_str = f"15m:{mtf_biases.get('15m')} | 1h:{mtf_biases.get('1h')} | 4h:{h4_bias} | 1D:{d1_bias}"
+    mtf_str = f"15m:{m15_t} | 1h:{h1_t} | 4h:{h4_t} | 1D:{mtf_biases.get('1D')}"
     votes_str = f"MTF [{mtf_str}] | Bull [{b_score}]: {', '.join(bullish_votes)} | Bear [{s_score}]: {', '.join(bearish_votes)}"
     decimals = 2 if is_gold else 5
 
@@ -243,7 +238,7 @@ def update_balance(con, delta):
 
 def close_single_trade(con, trade_id, current_price, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v11 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v12 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
@@ -258,17 +253,17 @@ def close_single_trade(con, trade_id, current_price, reason="Manual Close 👤")
     decimals = 2 if is_gold else 5
     
     con.execute(
-        "INSERT INTO trade_history_v11 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trade_history_v12 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, decimals), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM tv_open_trades_v11 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v12 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
 def check_auto_exit_conditions(con, symbol_label, current_price):
     cursor = con.cursor()
-    cursor.execute("SELECT id, bias, stop_loss, take_profit FROM tv_open_trades_v11 WHERE symbol = ?", (symbol_label,))
+    cursor.execute("SELECT id, bias, stop_loss, take_profit FROM tv_open_trades_v12 WHERE symbol = ?", (symbol_label,))
     open_trades = cursor.fetchall()
     
     for tid, bias, sl, tp in open_trades:
@@ -295,19 +290,19 @@ def manage_auto_trading(con, symbol, timeframe_label, result, lot_size, candle_t
         return
 
     cursor = con.cursor()
-    cursor.execute("SELECT id FROM tv_open_trades_v11 WHERE symbol = ? AND candle_timestamp = ?", (symbol, str(candle_ts)))
+    cursor.execute("SELECT id FROM tv_open_trades_v12 WHERE symbol = ? AND candle_timestamp = ?", (symbol, str(candle_ts)))
     if not cursor.fetchone():
         created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
         entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         con.execute(
-            "INSERT INTO tv_open_trades_v11 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tv_open_trades_v12 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (created_at_ist, symbol, timeframe_label, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
         )
         con.commit()
 
 # --- UI INTERFACE ---
-st.title("🪙 BIG MAN2 — Multi-Timeframe Master Bot")
-st.caption("MetaQuotes-Demo (5058003871) • 15m, 1h, 4h, 1D Harmonizer • 1:2.5 RRR")
+st.title("🪙 BIG MAN2 — Strict Multi-Timeframe Bot")
+st.caption("MetaQuotes-Demo (5058003871) • Strict Trend Harmonizer • 1:2.5 RRR")
 
 con = connect_db()
 m_status, m_text = get_forex_market_status()
@@ -335,12 +330,12 @@ with st.sidebar:
                 manage_auto_trading(con, symbol, timeframe, res_temp, lot_input, df_temp.index[-1], m_status)
                 st.sidebar.success(f"Trade Placed: {res_temp['bias']}!")
             else:
-                st.sidebar.warning("Trade Blocked! Multi-timeframe conflicts detected.")
+                st.sidebar.warning("Blocked! Trend conflict (Opposing timeframe detected).")
             st.rerun()
 
     if st.button("🗑️ Clear All Trades", use_container_width=True):
-        con.execute("DELETE FROM tv_open_trades_v11")
-        con.execute("DELETE FROM trade_history_v11")
+        con.execute("DELETE FROM tv_open_trades_v12")
+        con.execute("DELETE FROM trade_history_v12")
         con.commit()
         st.rerun()
 
@@ -365,8 +360,8 @@ if not df_current.empty and current_live_price > 0:
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Live Price", f"{current_live_price:.2f}" if is_gold else f"{current_live_price:.5f}")
-    col2.metric("4H / 1D Trend", f"4H:{mtf_biases.get('4h')} | 1D:{mtf_biases.get('1D')}")
-    col3.metric("Selected Bias", result["bias"])
+    col2.metric("15m / 1H Trend", f"15m:{mtf_biases.get('15m')} | 1H:{mtf_biases.get('1h')}")
+    col3.metric("Signal Bias", result["bias"])
     col4.metric("Confluence Score", f"Bull: {result['bullish']} | Bear: {result['bearish']}")
 
 st.divider()
@@ -392,10 +387,10 @@ with right:
 
 st.divider()
 st.subheader("📋 Active Open Trades")
-open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v11 ORDER BY id DESC", con)
+open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, timeframe, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v12 ORDER BY id DESC", con)
 
 if open_df.empty:
-    st.info("कोई ट्रेड ओपन नहीं है (जब तक सा Timeframe का ट्रेंड हारमोनिक नहीं होगा, बोट HOLD रहेगा)।")
+    st.info("कोई ट्रेड ओपन नहीं है (जब तक ट्रेंड मैच नहीं होगा, बोट HOLD रहेगा)।")
 else:
     for index, row in open_df.iterrows():
         row_gold = "XAU" in row['symbol']
@@ -408,7 +403,7 @@ else:
 
 st.divider()
 st.subheader("📜 Trade History")
-history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, pnl, exit_reason FROM trade_history_v11 ORDER BY id DESC LIMIT 30", con)
+history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, timeframe, bias, lot_size, pnl, exit_reason FROM trade_history_v12 ORDER BY id DESC LIMIT 30", con)
 if history_df.empty:
     st.info("इतिहास खाली है।")
 else:
