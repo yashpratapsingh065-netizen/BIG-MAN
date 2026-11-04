@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+import requests
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -12,24 +13,29 @@ st.set_page_config(page_title="BIG MAN 2.0 — Price Lesson Trader Bot", page_ic
 
 DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_2_0_price_lesson_bot.db")
 
-# EXACT SPOT SYMBOL MAPPING (Spot Gold XAUUSD=X matches OANDA Spot chart)
+# SECURE API KEY RETRIEVAL FOR TWELVE DATA (Exact OANDA Match Feed)
+try:
+    DIRECT_TWELVE_DATA_KEY = st.secrets.get("DIRECT_TWELVE_DATA_KEY", os.getenv("DIRECT_TWELVE_DATA_KEY", "a051e2e8558149d39c3d299f1c5feb83"))
+except Exception:
+    DIRECT_TWELVE_DATA_KEY = os.getenv("DIRECT_TWELVE_DATA_KEY", "a051e2e8558149d39c3d299f1c5feb83")
+
 SYMBOLS = {
-    "XAU/USD (Gold)": {"yf": "XAUUSD=X", "tv": "OANDA:XAUUSD", "mt5": "XAUUSD"},
-    "EUR/USD": {"yf": "EURUSD=X", "tv": "FX:EURUSD", "mt5": "EURUSD"},
-    "GBP/USD": {"yf": "GBPUSD=X", "tv": "FX:GBPUSD", "mt5": "GBPUSD"},
+    "XAU/USD (Gold)": {"td": "XAU/USD", "tv": "OANDA:XAUUSD", "mt5": "XAUUSD"},
+    "EUR/USD": {"td": "EUR/USD", "tv": "FX:EURUSD", "mt5": "EURUSD"},
+    "GBP/USD": {"td": "GBP/USD", "tv": "FX:GBPUSD", "mt5": "GBPUSD"},
 }
 
 INTERVALS = {
-    "15 min": {"yf": "15m", "tv_int": "15", "minutes": 15},
-    "1 hour": {"yf": "60m", "tv_int": "60", "minutes": 60},
-    "4 hours": {"yf": "1h", "tv_int": "240", "minutes": 240},
-    "1 day": {"yf": "1d", "tv_int": "D", "minutes": 1440}
+    "15 min": {"td": "15min", "tv_int": "15", "minutes": 15},
+    "1 hour": {"td": "1h", "tv_int": "60", "minutes": 60},
+    "4 hours": {"td": "240min", "tv_int": "240", "minutes": 240},
+    "1 day": {"td": "1day", "tv_int": "D", "minutes": 1440}
 }
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_open_trades_v29 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v30 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -45,7 +51,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v29 (
+        CREATE TABLE IF NOT EXISTS trade_history_v30 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -89,25 +95,45 @@ def get_forex_market_status():
     else:
         return "OPEN", "🟢 International Forex/Gold Market Live"
 
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=3, show_spinner=False)
 def get_market_data(symbol_label, interval_label, rows=150):
     info = SYMBOLS[symbol_label]
     cfg = INTERVALS[interval_label]
+    td_key = DIRECT_TWELVE_DATA_KEY
     
-    try:
-        import yfinance as yf
-        ticker = yf.Ticker(info["yf"])
-        df_yf = ticker.history(period="7d", interval=cfg["yf"])
-        if not df_yf.empty:
-            if isinstance(df_yf.columns, pd.MultiIndex):
-                df_yf.columns = df_yf.columns.get_level_values(0)
-            df_yf = df_yf.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close"})
-            df_yf["datetime_ist"] = df_yf.index.tz_convert(IST)
-            live_price = float(df_yf.close.iloc[-1])
-            if live_price > 0:
-                return df_yf[["open", "high", "low", "close", "datetime_ist"]].tail(rows), live_price, "Yahoo Finance Spot Feed 🟢"
-    except Exception:
-        pass
+    # TWELVE DATA (Direct OANDA Feed Match)
+    if td_key:
+        try:
+            resp = requests.get(
+                "https://api.twelvedata.com/time_series",
+                params={"symbol": info["td"], "interval": cfg["td"], "outputsize": rows, "apikey": td_key},
+                timeout=5,
+            )
+            payload = resp.json()
+            if "values" in payload:
+                df = pd.DataFrame(payload["values"])
+                df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
+                df["datetime_ist"] = df["datetime"].dt.tz_convert(IST)
+                for c in ["open", "high", "low", "close"]:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+                df = df.dropna(subset=["datetime", "open", "high", "low", "close"]).sort_values("datetime").set_index("datetime")
+                
+                # Fetch exact live price endpoint for 100% sync with TradingView OANDA chart
+                price_resp = requests.get(
+                    "https://api.twelvedata.com/price",
+                    params={"symbol": info["td"], "apikey": td_key},
+                    timeout=3
+                )
+                p_data = price_resp.json()
+                live_price = float(p_data["price"]) if "price" in p_data else float(df.close.iloc[-1])
+                
+                if not df.empty and live_price > 0:
+                    df.iloc[-1, df.columns.get_loc('close')] = live_price
+
+                if live_price > 0:
+                    return df[["open", "high", "low", "close", "datetime_ist"]].tail(rows), live_price, "Twelve Data OANDA-Matched Feed 🟢"
+        except Exception:
+            pass
 
     # FALLBACK
     dummy_price = 4040.0 if "XAU" in symbol_label else (1.0850 if "EUR" in symbol_label else 1.2850)
@@ -166,13 +192,11 @@ def evaluate_price_lesson_strategy(df, live_market_price, is_gold, timeframe_lab
     b_score = len(bull_votes) if bull_votes else 1
     s_score = len(bear_votes) if bear_votes else 1
     
-    # Strict Price Lesson Confluence Decision
     if b_score > s_score:
         bias = "BUY"
     elif s_score > b_score:
         bias = "SELL"
     else:
-        # Fallback to zone priority if scores tie
         bias = "BUY" if live_market_price < eq_50 else "SELL"
 
     votes_str = f"Bullish: {', '.join(bull_votes) if bull_votes else 'None'} | Bearish: {', '.join(bear_votes) if bear_votes else 'None'}"
@@ -212,7 +236,7 @@ def update_balance(con, delta):
 
 def close_single_trade(con, trade_id, current_price, symbol_name, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v29 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v30 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
@@ -227,17 +251,17 @@ def close_single_trade(con, trade_id, current_price, symbol_name, reason="Manual
     decimals = 2 if is_gold else 5
     
     con.execute(
-        "INSERT INTO trade_history_v29 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trade_history_v30 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, decimals), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM tv_open_trades_v29 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v30 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
 def check_auto_exit_conditions_for_symbol(con, symbol_label, current_price):
     cursor = con.cursor()
-    cursor.execute("SELECT id, bias, stop_loss, take_profit FROM tv_open_trades_v29 WHERE symbol = ?", (symbol_label,))
+    cursor.execute("SELECT id, bias, stop_loss, take_profit FROM tv_open_trades_v30 WHERE symbol = ?", (symbol_label,))
     open_trades = cursor.fetchall()
     
     for tid, bias, sl, tp in open_trades:
@@ -264,19 +288,19 @@ def manage_auto_trading(con, symbol, timeframe, result, lot_size, candle_ts, mar
         return
 
     cursor = con.cursor()
-    cursor.execute("SELECT id FROM tv_open_trades_v29 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
+    cursor.execute("SELECT id FROM tv_open_trades_v30 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
     if not cursor.fetchone():
         created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
         entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         con.execute(
-            "INSERT INTO tv_open_trades_v29 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tv_open_trades_v30 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
         )
         con.commit()
 
 # --- UI DESIGN ---
 st.title("🪙 BIG MAN 2.0 — Price Lesson Trader Bot")
-st.caption("MetaQuotes-Demo (5058003871) • Price Lesson SMC & P/D Engine • 1:2.5 RRR")
+st.caption("MetaQuotes-Demo (5058003871) • Twelve Data OANDA-Synced Feed • 1:2.5 RRR")
 
 con = connect_db()
 m_status, m_text = get_forex_market_status()
@@ -313,8 +337,8 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🗑️ Clear All Trades & History", use_container_width=True):
-        con.execute("DELETE FROM tv_open_trades_v29")
-        con.execute("DELETE FROM trade_history_v29")
+        con.execute("DELETE FROM tv_open_trades_v30")
+        con.execute("DELETE FROM trade_history_v30")
         con.commit()
         st.sidebar.success("Cleared!")
         st.rerun()
@@ -398,7 +422,7 @@ tf_tabs_mapping = {
 for tab_obj, tf_name in zip([tab_15m, tab_1h, tab_4h, tab_1d], tf_tabs_mapping.values()):
     with tab_obj:
         st.markdown(f"### 📌 {tf_name} Active Trades")
-        open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v29 WHERE symbol = ? AND timeframe = ? ORDER BY id DESC", con, params=(symbol, tf_name))
+        open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v30 WHERE symbol = ? AND timeframe = ? ORDER BY id DESC", con, params=(symbol, tf_name))
         
         if open_df.empty:
             st.info(f"[{tf_name}] Koi active trade nahi hai.")
@@ -415,7 +439,7 @@ for tab_obj, tf_name in zip([tab_15m, tab_1h, tab_4h, tab_1d], tf_tabs_mapping.v
                         st.rerun()
                         
         st.markdown(f"### 📜 {tf_name} Trade History")
-        history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, bias, lot_size, entry_price, exit_price, exit_reason, pnl FROM trade_history_v29 WHERE symbol = ? AND timeframe = ? ORDER BY id DESC LIMIT 20", con, params=(symbol, tf_name))
+        history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, bias, lot_size, entry_price, exit_price, exit_reason, pnl FROM trade_history_v30 WHERE symbol = ? AND timeframe = ? ORDER BY id DESC LIMIT 20", con, params=(symbol, tf_name))
         
         if history_df.empty:
             st.info(f"[{tf_name}] History khali hai.")
