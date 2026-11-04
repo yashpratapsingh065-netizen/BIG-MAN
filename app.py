@@ -7,46 +7,31 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 
-# ==================== CONFIGURATION ====================
-TWELVE_DATA_API_KEY = "d941e0ca121e4ebc9f9bb40b224a7970"
 IST = timezone(timedelta(hours=5, minutes=30))
 
-st.set_page_config(
-    page_title="BRODAX — Institutional Price Action Bot",
-    page_icon="⚡",
-    layout="wide"
-)
+st.set_page_config(page_title="BIG MAN2 — Twelve Data Embedded Bot", page_icon="🪙", layout="wide")
 
-# --- PREMIUM STYLING & CSS ---
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; color: #ffffff; }
-    .stMetric { background-color: #161b22; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }
-    .stAlert { background-color: #1f242d; border: 1px solid #30363d; color: #c9d1d9; }
-    h1, h2, h3 { color: #f0f6fc !important; font-family: 'Inter', sans-serif; }
-    </style>
-""", unsafe_allow_html=True)
+DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_price_action_bot_v21.db")
 
-DB_PATH = os.getenv("BRODAX_DB_PATH", "brodax_pro_bot.db")
+DIRECT_TWELVE_DATA_KEY = "a051e2e8558149d39c3d299f1c5feb83"
 
-CRYPTO_SYMBOLS = {
-    "Bitcoin (BTC/USD)": {"binance_symbol": "BTCUSDT", "twelve_symbol": "BTC/USD", "tv_symbol": "BINANCE:BTCUSDT", "lot": 0.01, "base_p": 91500.0},
-    "Ethereum (ETH/USD)": {"binance_symbol": "ETHUSDT", "twelve_symbol": "ETH/USD", "tv_symbol": "BINANCE:ETHUSDT", "lot": 0.1, "base_p": 3350.0},
-    "Solana (SOL/USD)": {"binance_symbol": "SOLUSDT", "twelve_symbol": "SOL/USD", "tv_symbol": "BINANCE:SOLUSDT", "lot": 1.0, "base_p": 195.0},
-    "Ripple (XRP/USD)": {"binance_symbol": "XRPUSDT", "twelve_symbol": "XRP/USD", "tv_symbol": "BINANCE:XRPUSDT", "lot": 10.0, "base_p": 2.45}
+SYMBOLS = {
+    "XAU/USD (Gold)": {"tv": "OANDA:XAUUSD", "td": "XAU/USD", "yf": "GC=F", "mt5": "XAUUSD"},
+    "EUR/USD": {"tv": "FX:EURUSD", "td": "EUR/USD", "yf": "EURUSD=X", "mt5": "EURUSD"},
+    "GBP/USD": {"tv": "FX:GBPUSD", "td": "GBP/USD", "yf": "GBPUSD=X", "mt5": "GBPUSD"},
 }
 
 INTERVALS = {
-    "15 min": {"tv_int": "15", "twelve_int": "15min", "binance_int": "15m", "pd_freq": "15min"},
-    "1 hour": {"tv_int": "60", "twelve_int": "1h", "binance_int": "1h", "pd_freq": "1h"},
-    "4 hours": {"tv_int": "240", "twelve_int": "4h", "binance_int": "4h", "pd_freq": "4h"},
-    "1 day": {"tv_int": "D", "twelve_int": "1day", "binance_int": "1d", "pd_freq": "1D"}
+    "15 min": {"td": "15min", "yf": "15m", "tv_int": "15", "minutes": 15},
+    "1 hour": {"td": "1h", "yf": "60m", "tv_int": "60", "minutes": 60},
+    "4 hours": {"td": "240min", "yf": "1h", "tv_int": "240", "minutes": 240},
+    "1 day": {"td": "1day", "yf": "1d", "tv_int": "D", "minutes": 1440}
 }
 
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS brodax_open_trades_v5 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v21 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -62,7 +47,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS brodax_trade_history_v5 (
+        CREATE TABLE IF NOT EXISTS trade_history_v21 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -75,360 +60,356 @@ def connect_db():
             lot_size REAL,
             bias TEXT NOT NULL,
             exit_reason TEXT NOT NULL,
-            pnl_usd REAL NOT NULL,
+            pnl REAL NOT NULL,
             strategy_votes TEXT
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS brodax_account_balance (
+        CREATE TABLE IF NOT EXISTS account_balance (
             id INTEGER PRIMARY KEY,
-            balance_usd REAL NOT NULL
+            balance REAL NOT NULL
         )
     """)
     cursor = con.cursor()
-    cursor.execute("SELECT balance_usd FROM brodax_account_balance WHERE id = 1")
-    if not cursor.fetchone():
-        con.execute("INSERT INTO brodax_account_balance (id, balance_usd) VALUES (1, 500.0)")
+    cursor.execute("SELECT balance FROM account_balance WHERE id = 1")
+    row = cursor.fetchone()
+    if not row:
+        con.execute("INSERT INTO account_balance (id, balance) VALUES (1, 3000.0)")
     con.commit()
     return con
 
-@st.cache_data(ttl=5)
-def get_live_binance_price(binance_symbol):
-    try:
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={binance_symbol}"
-        resp = requests.get(url, timeout=3)
-        data = resp.json()
-        if "price" in data:
-            return float(data["price"]), "Binance Real-Time Ticker 🟢"
-    except Exception:
-        pass
-    return None, None
-
-def get_market_data(symbol_key, interval_key, limit=100):
-    info = CRYPTO_SYMBOLS[symbol_key]
-    cfg = INTERVALS[interval_key]
-    rt_price, feed_source = get_live_binance_price(info["binance_symbol"])
-    
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={info['binance_symbol']}&interval={cfg['binance_int']}&limit={limit}"
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        
-        if isinstance(data, list) and len(data) > 0:
-            candles = [{
-                "datetime": pd.to_datetime(row[0], unit='ms'),
-                "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4])
-            } for row in data]
-            df = pd.DataFrame(candles).set_index("datetime")
-            
-            if rt_price is not None:
-                df.iloc[-1, df.columns.get_loc("close")] = rt_price
-                df.iloc[-1, df.columns.get_loc("high")] = max(df.iloc[-1]["high"], rt_price)
-                df.iloc[-1, df.columns.get_loc("low")] = min(df.iloc[-1]["low"], rt_price)
-                current_price = rt_price
-            else:
-                current_price = float(df.iloc[-1]["close"])
-                feed_source = "Binance Klines Feed 🟢"
-
-            df['datetime_ist'] = df.index.tz_localize('UTC').tz_convert(IST) if df.index.tz is None else df.index.tz_convert(IST)
-            return df[['open', 'high', 'low', 'close', 'datetime_ist']], current_price, feed_source
-    except Exception:
-        pass
-
-    fallback_p = rt_price if rt_price else info["base_p"]
-    dates = pd.date_range(end=datetime.now(timezone.utc), periods=limit, freq=cfg["pd_freq"])
-    df = pd.DataFrame(index=dates)
-    df['open'] = df['high'] = df['low'] = df['close'] = float(fallback_p)
-    df['datetime_ist'] = df.index.tz_convert(IST)
-    return df[['open', 'high', 'low', 'close', 'datetime_ist']], float(fallback_p), "Static Fallback 🔴"
-
-def evaluate_daily_bias_strategy(symbol_key, current_price):
-    """
-    Price Lesson Expert Daily Bias Framework:
-    - Analyzes Daily (1D) time-frame for Previous Day High/Low breaks, Liquidity Sweeps (Wicks), and Inside Bars.
-    """
-    df_daily, _, _ = get_market_data(symbol_key, "1 day", limit=10)
-    if df_daily.empty or len(df_daily) < 3:
-        return "BUY", "Initializing Daily Bias...", 1, 1
-
-    prev = df_daily.iloc[-2]  # Previous Completed Day
-    p_prev = df_daily.iloc[-3] # Day before previous
-    
-    pd_high = prev['high']
-    pd_low = prev['low']
-    
-    # Check Inside Bar Condition
-    is_inside_bar = prev['high'] <= p_prev['high'] and prev['low'] >= p_prev['low']
-    
-    bullish_votes = []
-    bearish_votes = []
-    
-    if is_inside_bar:
-        if current_price > pd_high:
-            bullish_votes.append("Inside Bar Breakout (Bullish)")
-        elif current_price < pd_low:
-            bearish_votes.append("Inside Bar Breakdown (Bearish)")
-        else:
-            bullish_votes.append("Inside Bar Consolidation (Neutral Bias)")
+def get_forex_market_status():
+    now_utc = datetime.now(timezone.utc)
+    weekday = now_utc.weekday()
+    hour = now_utc.hour
+    if weekday == 5:
+        return "CLOSED", "🔴 Market Closed (Weekend Saturday)"
+    elif weekday == 6 and hour < 22:
+        return "CLOSED", "🔴 Market Closed (Weekend Sunday)"
+    elif weekday == 4 and hour >= 22:
+        return "CLOSED", "🔴 Market Closed (Weekend Friday Evening)"
     else:
-        # Standard Daily Bias Logic based on Video Framework
-        if prev['close'] > pd_high:
-            bullish_votes.append("Daily Close Above Prev High (Bullish Bias)")
-        elif prev['close'] < pd_low:
-            bearish_votes.append("Daily Close Below Prev Low (Bearish Bias)")
-        else:
-            # Check Wick Sweeps
-            if prev['low'] < p_prev['low'] and prev['close'] > prev['open']:
-                bullish_votes.append("Prev Day Low Liquidity Sweep (Bullish Reversal)")
-            elif prev['high'] > p_prev['high'] and prev['close'] < prev['open']:
-                bearish_votes.append("Prev Day High Liquidity Sweep (Bearish Reversal)")
-            else:
-                if current_price >= ((pd_high + pd_low) / 2):
-                    bearish_votes.append("Premium Zone Equilibrium")
-                else:
-                    bullish_votes.append("Discount Zone Equilibrium")
+        return "OPEN", "🟢 International Forex/Gold Market Live"
 
-    b_score = len(bullish_votes) if bullish_votes else 1
-    s_score = len(bearish_votes) if bearish_votes else 1
+def get_market_data(symbol_label, interval_label, rows=150):
+    info = SYMBOLS[symbol_label]
+    cfg = INTERVALS[interval_label]
+    td_key = DIRECT_TWELVE_DATA_KEY
     
-    bias = "BUY" if b_score >= s_score else "SELL"
-    votes_str = f"Bullish: {', '.join(bullish_votes) if bullish_votes else 'None'} | Bearish: {', '.join(bearish_votes) if bearish_votes else 'None'}"
-    return bias, votes_str, b_score, s_score
+    if td_key:
+        try:
+            resp = requests.get(
+                "https://api.twelvedata.com/time_series",
+                params={"symbol": info["td"], "interval": cfg["td"], "outputsize": rows, "apikey": td_key},
+                timeout=7,
+            )
+            payload = resp.json()
+            if "values" in payload:
+                df = pd.DataFrame(payload["values"])
+                df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
+                df["datetime_ist"] = df["datetime"].dt.tz_convert(IST)
+                for c in ["open", "high", "low", "close"]:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+                df = df.dropna(subset=["datetime", "open", "high", "low", "close"])
+                df = df.sort_values("datetime").set_index("datetime")
+                live_price = float(df.close.iloc[-1])
+                if live_price > 0:
+                    return df[["open", "high", "low", "close", "datetime_ist"]].tail(rows), live_price, "Twelve Data Real-Time Feed 🟢"
+        except Exception:
+            pass
 
-def evaluate_brodax_strategy(df, current_price, symbol_key):
-    current_price = float(current_price)
-    if df.empty or len(df) < 20:
-        return {
-            "bias": "BUY", "votes": "Initializing...", "bullish": 1, "bearish": 0,
-            "analysis": "Gathering price action...", "entry": current_price,
-            "sl": current_price * 0.99, "tp": current_price * 1.02, "candle_ts": "init"
-        }
-    
-    # Integrate Daily Bias Framework
-    daily_bias, daily_votes, b_daily, s_daily = evaluate_daily_bias_strategy(symbol_key, current_price)
-    
-    resistance_level = float(df['high'].max())
-    support_level = float(df['low'].min())
-    equilibrium = (resistance_level + support_level) / 2.0
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(info["yf"])
+        df_yf = ticker.history(period="5d", interval=cfg["yf"])
+        if not df_yf.empty:
+            df_yf = df_yf.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close"})
+            df_yf["datetime_ist"] = df_yf.index.tz_convert(IST)
+            live_price = float(df_yf.close.iloc[-1])
+            if live_price > 0:
+                return df_yf[["open", "high", "low", "close", "datetime_ist"]].tail(rows), live_price, "Yahoo Finance Fallback Feed 🟡"
+    except Exception:
+        pass
+        
+    dummy_price = 3915.0 if "XAU" in symbol_label else (1.0850 if "EUR" in symbol_label else 1.2850)
+    dates = pd.date_range(end=datetime.now(timezone.utc), periods=rows, freq="15min")
+    df_dummy = pd.DataFrame({
+        "open": dummy_price,
+        "high": dummy_price + 2.0,
+        "low": dummy_price - 2.0,
+        "close": dummy_price,
+        "datetime_ist": pd.Series(dates).dt.tz_convert(IST)
+    }, index=dates)
+    return df_dummy, dummy_price, "Static Fallback Feed 🔴"
+
+def evaluate_price_lesson_strategy(df, live_market_price, is_gold):
+    if len(df) < 10:
+        return {"bias":"BUY", "votes":"Default Execution Active", "bullish":1, "bearish":0, "entry":live_market_price, "sl":live_market_price-(2.5 if is_gold else 0.0015), "tp":live_market_price+(6.25 if is_gold else 0.00375)}
     
     last = df.iloc[-1]
-    prev = df.iloc[-2]
-    p_prev = df.iloc[-3]
-    candle_ts = str(df.index[-1])
+    rng = max(last.high - last.low, 1e-12)
+    swing_high = float(df.high.tail(30).max())
+    swing_low = float(df.low.tail(30).min())
+    eq_50 = (swing_high + swing_low) / 2.0
     
-    bullish_confluences = [f"Daily Bias: {daily_bias}"] if daily_bias == "BUY" else []
-    bearish_confluences = [f"Daily Bias: {daily_bias}"] if daily_bias == "SELL" else []
-    
-    if current_price <= equilibrium:
-        bullish_confluences.append("Discount Zone (< 0.5 Eq)")
+    if live_market_price >= eq_50:
+        bias = "SELL"
+        votes_str = "Upper Premium Zone -> Active SELL Bias"
     else:
-        bearish_confluences.append("Premium Zone (> 0.5 Eq)")
-        
-    if last.low > p_prev.high and prev.close > prev.open:
-        bullish_confluences.append("Bullish FVG")
-    elif last.high < p_prev.low and prev.close < prev.open:
-        bearish_confluences.append("Bearish FVG")
+        bias = "BUY"
+        votes_str = "Lower Discount Zone -> Active BUY Bias"
 
-    body = abs(last['close'] - last['open'])
-    if (min(last['open'], last['close']) - last['low']) >= body * 1.0 and last['close'] > last['open']:
-        bullish_confluences.append("Demand Rejection Wick")
-    elif (last['high'] - max(last['open'], last['close'])) >= body * 1.0 and last['close'] < last['open']:
-        bearish_confluences.append("Supply Rejection Wick")
-        
-    b_score = len(bullish_confluences)
-    s_score = len(bearish_confluences)
-    
-    bias = daily_bias if b_score == s_score else ("BUY" if b_score > s_score else "SELL")
-    
-    decimals = 2 if current_price > 10 else 4
+    sl_buffer = max(rng * 1.2, 2.5 if is_gold else 0.0015)
+    tp_buffer = sl_buffer * 2.5
+
     if bias == "BUY":
-        sl = round(support_level * 0.992, decimals)
-        tp = round(current_price + (current_price - sl) * 2.0, decimals)
-        analysis = f"Daily Bias Aligned (BUY) | Support SL: ${support_level:,.2f}"
+        sl = live_market_price - sl_buffer
+        tp = live_market_price + tp_buffer
     else:
-        sl = round(resistance_level * 1.008, decimals)
-        tp = round(current_price - (sl - current_price) * 2.0, decimals)
-        analysis = f"Daily Bias Aligned (SELL) | Resistance SL: ${resistance_level:,.2f}"
-        
-    votes_str = f"Bullish [{b_score}]: {', '.join(bullish_confluences)} | Bearish [{s_score}]: {', '.join(bearish_confluences)}"
-    
+        sl = live_market_price + sl_buffer
+        tp = live_market_price - tp_buffer
+
+    decimals = 2 if is_gold else 5
     return {
-        "bias": bias, "votes": votes_str, "bullish": b_score, "bearish": s_score,
-        "analysis": analysis, "entry": round(current_price, decimals), "sl": sl, "tp": tp, "candle_ts": candle_ts
+        "bias": bias,
+        "votes": votes_str,
+        "bullish": 2,
+        "bearish": 0,
+        "entry": round(live_market_price, decimals),
+        "sl": round(sl, decimals),
+        "tp": round(tp, decimals)
     }
 
 def get_current_balance(con):
     cursor = con.cursor()
-    cursor.execute("SELECT balance_usd FROM brodax_account_balance WHERE id = 1")
+    cursor.execute("SELECT balance FROM account_balance WHERE id = 1")
     row = cursor.fetchone()
-    return float(row[0]) if row else 500.0
+    return float(row[0]) if row else 3000.0
 
 def update_balance(con, delta):
     current = get_current_balance(con)
-    new_bal = current + float(delta)
-    con.execute("UPDATE brodax_account_balance SET balance_usd = ? WHERE id = 1", (new_bal,))
+    new_bal = current + delta
+    con.execute("UPDATE account_balance SET balance = ? WHERE id = 1", (new_bal,))
     con.commit()
     return new_bal
 
-def execute_brodax_trade(con, symbol, timeframe, result, lot_size):
+def close_single_trade(con, trade_id, current_price, symbol_name, reason="Manual Close 👤"):
     cursor = con.cursor()
-    candle_ts = str(result["candle_ts"])
-    bias = result["bias"]
-    
-    cursor.execute("SELECT id FROM brodax_open_trades_v5 WHERE symbol = ? AND candle_timestamp = ?", (symbol, candle_ts))
-    if cursor.fetchone():
-        return False, "Duplicate trade blocked for this candle!"
-
-    cursor.execute("SELECT id FROM brodax_open_trades_v5 WHERE symbol = ? AND bias = ?", (symbol, bias))
-    if cursor.fetchone():
-        return False, "Active trade with same bias exists!"
-
-    created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
-    entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    con.execute(
-        "INSERT INTO brodax_open_trades_v5 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (created_at_ist, symbol, timeframe, entry_time_utc, float(result["entry"]), float(result["sl"]), float(result["tp"]), float(lot_size), str(bias), str(result["votes"]), candle_ts)
-    )
-    con.commit()
-    return True, "Trade executed successfully!"
-
-def close_single_trade(con, trade_id, current_price, reason="Manual Close 👤"):
-    cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM brodax_open_trades_v5 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes FROM tv_open_trades_v21 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
     
     created_at_ist, symbol, timeframe, entry_price, sl, tp, lot_size, bias, strategy_votes = row
-    current_price, entry_price, lot_size = float(current_price), float(entry_price), float(lot_size)
+    is_gold = "XAU" in symbol
     
     diff = (current_price - entry_price) if bias == "BUY" else (entry_price - current_price)
-    pnl_usd = round(diff * lot_size, 2)
+    multiplier = 100 if is_gold else 10000
+    pnl_usd = round(diff * lot_size * multiplier, 2)
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
+    decimals = 2 if is_gold else 5
     
     con.execute(
-        "INSERT INTO brodax_trade_history_v5 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl_usd, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, 4), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
+        "INSERT INTO trade_history_v21 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, decimals), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM brodax_open_trades_v5 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v21 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
-# --- UI INTERFACE ---
-st.markdown("<h1 style='text-align: center;'>⚡ BRODAX — Institutional Price Action Master</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: #8b949e;'>Daily Bias Strategy • FVG & Equilibrium Confluence • Real-Time Binance Feed</p>", unsafe_allow_html=True)
-st.divider()
+def check_auto_exit_conditions_for_symbol(con, symbol_label, current_price):
+    cursor = con.cursor()
+    cursor.execute("SELECT id, bias, stop_loss, take_profit FROM tv_open_trades_v21 WHERE symbol = ?", (symbol_label,))
+    open_trades = cursor.fetchall()
+    
+    for tid, bias, sl, tp in open_trades:
+        closed = False
+        exit_p = current_price
+        reason = "Manual Close"
+        
+        if bias == "BUY":
+            if current_price >= tp:
+                exit_p, reason, closed = tp, "TP Hitter 🎯", True
+            elif current_price <= sl:
+                exit_p, reason, closed = sl, "SL Hitter 🛑", True
+        elif bias == "SELL":
+            if current_price <= tp:
+                exit_p, reason, closed = tp, "TP Hitter 🎯", True
+            elif current_price >= sl:
+                exit_p, reason, closed = sl, "SL Hitter 🛑", True
+                
+        if closed:
+            close_single_trade(con, tid, exit_p, symbol_label, reason=reason)
+
+def manage_auto_trading(con, symbol, timeframe, result, lot_size, candle_ts, market_status, allow_weekend_practice):
+    if market_status != "OPEN" and not allow_weekend_practice:
+        return
+    if result["bias"] == "HOLD":
+        return
+
+    cursor = con.cursor()
+    cursor.execute("SELECT id FROM tv_open_trades_v21 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
+    if not cursor.fetchone():
+        created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
+        entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        con.execute(
+            "INSERT INTO tv_open_trades_v21 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts))
+        )
+        con.commit()
+
+st.title("🪙 BIG MAN2 — Twelve Data Embedded Bot")
+st.caption("MetaQuotes-Demo (5058003871) • API Key Embedded • 1:2.5 RRR")
 
 con = connect_db()
+m_status, m_text = get_forex_market_status()
 
 with st.sidebar:
     st.header("⚙️ Control Panel")
-    symbol = st.selectbox("Select Asset", list(CRYPTO_SYMBOLS.keys()), index=0)
-    timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=1)
     
-    default_lot = CRYPTO_SYMBOLS[symbol]["lot"]
-    lot_input = st.number_input("Trade Lot Size", min_value=0.001, max_value=50.0, value=default_lot, step=0.001)
+    with st.expander("🔑 MT5 Account Credentials", expanded=False):
+        st.text_input("Login ID", value="5058003871", disabled=True)
+        st.text_input("Server", value="MetaQuotes-Demo", disabled=True)
+        st.success("🟢 Account Synced")
+
+    symbol = st.selectbox("Select Asset", list(SYMBOLS.keys()), index=0)
+    active_chart_tf = st.selectbox("Active Chart Timeframe", list(INTERVALS.keys()), index=0)
+    lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.01, step=0.01)
     
-    if st.button("🔄 Refresh Data", use_container_width=True):
+    if st.button("🔄 Refresh Market Data", use_container_width=True):
+        st.toast("Refreshed!", icon="🔄")
         st.rerun()
-
-    st.markdown("---")
-    st.subheader("⚡ Execution Mode")
-    auto_mode = st.toggle("Enable Auto-Pilot Execution", value=False)
     
-    if st.button("➕ Open Brodax Trade", use_container_width=True):
-        df_temp, live_p, _ = get_market_data(symbol, timeframe)
-        res_temp = evaluate_brodax_strategy(df_temp, live_p, symbol)
-        success, msg = execute_brodax_trade(con, symbol, timeframe, res_temp, lot_size=lot_input)
-        if success:
-            st.sidebar.success(msg)
+    st.markdown("---")
+    weekend_practice = st.checkbox("Weekend Practice Mode", value=True)
+    auto_mode = st.toggle("Enable Auto-Pilot Bot", value=True)
+    
+    is_gold = "XAU" in symbol
+    df_temp, live_p_temp, _ = get_market_data(symbol, active_chart_tf)
+    
+    if st.button("➕ Open Manual Trade", use_container_width=True):
+        if not df_temp.empty and live_p_temp > 0:
+            res_temp = evaluate_price_lesson_strategy(df_temp, live_p_temp, is_gold)
+            candle_ts = df_temp.index[-1]
+            manage_auto_trading(con, symbol, active_chart_tf, res_temp, lot_size=lot_input, candle_ts=candle_ts, market_status=m_status, allow_weekend_practice=weekend_practice)
+            st.sidebar.success(f"Manual Trade Added for {symbol} ({active_chart_tf})!")
             st.rerun()
-        else:
-            st.sidebar.warning(msg)
 
     st.markdown("---")
-    if st.button("🗑️ Clear All Open Trades", use_container_width=True):
-        con.execute("DELETE FROM brodax_open_trades_v5")
+    if st.button("🗑️ Clear All Trades & History", use_container_width=True):
+        con.execute("DELETE FROM tv_open_trades_v21")
+        con.execute("DELETE FROM trade_history_v21")
         con.commit()
         st.sidebar.success("Cleared!")
         st.rerun()
 
-    if st.button("🔄 Reset Balance ($500)", use_container_width=True):
-        con.execute("UPDATE brodax_account_balance SET balance_usd = 500.0 WHERE id = 1")
+    if st.button("🔄 Reset Demo Balance ($3,000)", use_container_width=True):
+        con.execute("UPDATE account_balance SET balance = 3000.0 WHERE id = 1")
         con.commit()
+        st.sidebar.success("Reset to $3,000!")
         st.rerun()
 
-df, live_price, feed_source = get_market_data(symbol, timeframe)
-result = evaluate_brodax_strategy(df, live_price, symbol)
+st.info(f"Market Status: **{m_text}**")
+
+is_gold = "XAU" in symbol
+live_price_global = 0.0
 
 if auto_mode:
-    execute_brodax_trade(con, symbol, timeframe, result, lot_size=lot_input)
+    for tf_lbl in INTERVALS.keys():
+        df_scan, live_p_scan, _ = get_market_data(symbol, tf_lbl)
+        if not df_scan.empty and live_p_scan > 0:
+            if tf_lbl == active_chart_tf:
+                live_price_global = live_p_scan
+            res_scan = evaluate_price_lesson_strategy(df_scan, live_p_scan, is_gold)
+            manage_auto_trading(con, symbol, tf_lbl, res_scan, lot_size=lot_input, candle_ts=df_scan.index[-1], market_status=m_status, allow_weekend_practice=weekend_practice)
+
+if live_price_global == 0.0:
+    _, live_price_global, _ = get_market_data(symbol, active_chart_tf)
+
+check_auto_exit_conditions_for_symbol(con, symbol, live_price_global)
 
 curr_balance = get_current_balance(con)
+bal_color = "🟢" if curr_balance >= 3000 else "🔴"
+st.markdown(f"### 💵 Account Balance: **${curr_balance:,.2f} USD** {bal_color}")
 
-# --- METRICS DISPLAY ---
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("💵 Balance", f"${curr_balance:,.2f} USD")
-col2.metric("📈 Live Price", f"${live_price:,.2f}" if live_price > 10 else f"${live_price:,.4f}")
-col3.metric("🎯 Daily Bias", result["bias"])
-col4.metric("📊 Confluence Score", f"B: {result['bullish']} | S: {result['bearish']}")
+df_active, live_p_active, data_source = get_market_data(symbol, active_chart_tf)
+if live_p_active > 0:
+    live_price_global = live_p_active
 
-st.info(f"🟢 **System Status:** Active & Synced | **Feed:** {feed_source}")
+result_active = evaluate_price_lesson_strategy(df_active, live_price_global, is_gold)
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Live Market Price", f"{live_price_global:.2f}" if is_gold else f"{live_price_global:.5f}")
+col2.metric(f"{active_chart_tf} Bias", result_active["bias"])
+col3.metric("Execution Status", "Active & Isolated 🟢")
 
 st.divider()
-left, right = st.columns([1.7, 1])
+
+left, right = st.columns([1.8, 1])
 
 with left:
-    st.subheader(f"📈 Live TradingView Chart ({symbol} - {timeframe})")
-    tv_sym = CRYPTO_SYMBOLS[symbol]["tv_symbol"]
-    tv_int = INTERVALS[timeframe]["tv_int"]
+    st.subheader(f"📈 Live Chart ({symbol} - {active_chart_tf})")
+    tv_symbol = SYMBOLS[symbol]["tv"]
+    tv_int = INTERVALS[active_chart_tf]["tv_int"]
     
     chart_html = f"""
-    <div style="height:500px;width:100%">
-      <iframe src="https://s.tradingview.com/widgetembed/?symbol={tv_sym}&interval={tv_int}&hidesidetoolbar=0&hidetoptoolbar=0&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Asia%2FKolkata&locale=en" style="width:100%;height:500px;border:none;" scrolling="no"></iframe>
+    <div style="height:480px;width:100%">
+      <iframe src="https://s.tradingview.com/widgetembed/?symbol={tv_symbol}&interval={tv_int}&hidesidetoolbar=0&hidetoptoolbar=0&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=[]&theme=dark&style=1&timezone=Asia%2FKolkata&locale=en" style="width:100%;height:480px;border:none;" scrolling="no"></iframe>
     </div>
     """
-    components.html(chart_html, height=515, scrolling=False)
+    components.html(chart_html, height=495, scrolling=False)
 
 with right:
-    st.subheader("💡 Expert Price Analysis")
-    st.success(f"**Structure:** {result['analysis']}")
-    st.write(f"**Breakdown:** {result['votes']}")
-    st.markdown(f"🛑 **Stop Loss:** `{result['sl']:,.2f}`")
-    st.markdown(f"🎯 **Take Profit:** `{result['tp']:,.2f}`")
-    st.markdown("---")
-    if not df.empty:
-        view = df.tail(3).copy()
-        view.index = view.index.strftime('%d %b %H:%M')
-        st.dataframe(view, use_container_width=True)
+    st.subheader("💡 Confluence Details")
+    if not df_active.empty:
+        st.write(f"**Breakdown:** {result_active['votes']}")
+        fmt = ".2f" if is_gold else ".5f"
+        st.write(f"**Stop Loss:** `{result_active['sl']:{fmt}}` | **Take Profit:** `{result_active['tp']:{fmt}}`")
+        st.markdown(f"*Source: {data_source}*")
 
 st.divider()
-st.subheader("📋 Active Open Positions")
-open_df = pd.read_sql_query("SELECT * FROM brodax_open_trades_v5 ORDER BY id DESC", con)
+st.subheader("📂 Dedicated Timeframe Sections (Active Trades & History)")
 
-if open_df.empty:
-    st.info("Abhi koi open trade nahi hai.")
-else:
-    for index, row in open_df.iterrows():
-        with st.expander(f"📌 Trade ID #{row['id']} | {row['symbol']} ({row['bias']} - {row['lot_size']} Lot)"):
-            c1, c2 = st.columns(2)
-            c1.markdown(f"🕒 **Time:** `{row['created_at_ist']}`\n📍 **Entry:** `${row['entry_price']:,.2f}`\n🛑 **SL:** `${row['stop_loss']:,.2f}`")
-            c2.markdown(f"🎯 **TP:** `${row['take_profit']:,.2f}`\n⚡ **Status:** `ACTIVE`\n📊 **Votes:** `{row['strategy_votes']}`")
-            if st.button(f"Close Trade #{row['id']}", key=f"close_{row['id']}"):
-                close_single_trade(con, row['id'], live_price, reason="Manual Close 👤")
-                st.rerun()
+tab_15m, tab_1h, tab_4h, tab_1d = st.tabs(["⏱️ 15 Min Section", "⏰ 1 Hour Section", "📅 4 Hours Section", "🗓️ 1 Day Section"])
 
-st.divider()
-st.subheader("📜 Trade History")
-history_df = pd.read_sql_query("SELECT * FROM brodax_trade_history_v5 ORDER BY id DESC LIMIT 50", con)
+tf_tabs_mapping = {
+    "⏱️ 15 Min Section": "15 min",
+    "⏰ 1 Hour Section": "1 hour",
+    "📅 4 Hours Section": "4 hours",
+    "🗓️ 1 Day Section": "1 day"
+}
 
-if history_df.empty:
-    st.info("History khali hai.")
-else:
-    for index, row in history_df.iterrows():
-        pnl_color = "🟢" if row['pnl_usd'] >= 0 else "🔴"
-        with st.expander(f"{pnl_color} ID #{row['id']} | {row['symbol']} ({row['bias']}) | PnL: ${row['pnl_usd']:,.2f}"):
-            st.markdown(f"**Realized PnL:** `${row['pnl_usd']:,.2f} USD` | **Reason:** `{row['exit_reason']}`")
+for tab_obj, tf_name in zip([tab_15m, tab_1h, tab_4h, tab_1d], tf_tabs_mapping.values()):
+    with tab_obj:
+        st.markdown(f"### 📌 {tf_name} Active Trades")
+        open_df = pd.read_sql_query("SELECT id, created_at_ist, symbol, bias, lot_size, entry_price, stop_loss, take_profit, strategy_votes FROM tv_open_trades_v21 WHERE symbol = ? AND timeframe = ? ORDER BY id DESC", con, params=(symbol, tf_name))
+        
+        if open_df.empty:
+            st.info(f"[{tf_name}] कोई सक्रिय ट्रेड नहीं है।")
+        else:
+            for index, row in open_df.iterrows():
+                row_is_gold = "XAU" in symbol
+                fmt = ".2f" if row_is_gold else ".5f"
+                with st.expander(f"📌 Trade ID #{row['id']} | {row['symbol']} ({row['bias']} - {row['lot_size']} Lot)"):
+                    c1, c2 = st.columns(2)
+                    c1.markdown(f"🕒 **Entry:** `{row['created_at_ist']}`\n📍 **Price:** `{row['entry_price']:{fmt}}`\n🛑 **SL:** `{row['stop_loss']:{fmt}}`")
+                    c2.markdown(f"🎯 **TP:** `{row['take_profit']:{fmt}}`\n⚡ **Status:** `ISOLATED ACTIVE`")
+                    if st.button(f"Close #{row['id']}", key=f"close_{tf_name}_{row['id']}"):
+                        close_single_trade(con, row['id'], live_price_global, symbol, reason="Manual Close 👤")
+                        st.rerun()
+                        
+        st.markdown(f"### 📜 {tf_name} Trade History")
+        history_df = pd.read_sql_query("SELECT id, created_at_ist, closed_at_ist, symbol, bias, lot_size, entry_price, exit_price, exit_reason, pnl FROM trade_history_v21 WHERE symbol = ? AND timeframe = ? ORDER BY id DESC LIMIT 20", con, params=(symbol, tf_name))
+        
+        if history_df.empty:
+            st.info(f"[{tf_name}] इतिहास खाली है।")
+        else:
+            for index, row in history_df.iterrows():
+                pnl_color = "🟢" if row['pnl'] >= 0 else "🔴"
+                row_is_gold = "XAU" in symbol
+                fmt = ".2f" if row_is_gold else ".5f"
+                with st.expander(f"{pnl_color} ID #{row['id']} | {row['symbol']} ({row['bias']}) | PnL: ${row['pnl']:+.2f}"):
+                    st.markdown(f"**PnL:** `${row['pnl']:+.2f}` | **Reason:** `{row['exit_reason']}`")
 
 con.close()
