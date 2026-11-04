@@ -450,4 +450,6 @@ for tab_obj, tf_name in zip([tab_15m, tab_1h, tab_4h, tab_1d], tf_tabs_mapping.v
                 row_is_gold = "XAU" in symbol
                 fmt = ".2f" if row_is_gold else ".5f"
                 with st.expander(f"{pnl_color} ID #{row['id']} | {row['symbol']} ({row['bias']}) | PnL: ${row['pnl']:+.2f}"):
-                    st.markdown(f"**PnL:** `${row['pnl']:+.2f}` | **Reason:** `{row['exit_reaso
+                    st.markdown(f"**PnL:** `${row['pnl']:+.2f}` | **Reason:** `{row['exit_reason']}`")
+
+con.close()
