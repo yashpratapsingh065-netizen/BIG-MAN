@@ -13,7 +13,11 @@ st.set_page_config(page_title="BIG MAN 2.0 — Synchronized Price Action Bot", p
 
 DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_2_0_synchronized_bot.db")
 
-DIRECT_TWELVE_DATA_KEY = "a051e2e8558149d39c3d299f1c5feb83"
+# SECURE API KEY RETRIEVAL (Streamlit Secrets / Environment Variable)
+DIRECT_TWELVE_DATA_KEY = st.secrets.get(
+    "DIRECT_TWELVE_DATA_KEY", 
+    os.getenv("DIRECT_TWELVE_DATA_KEY", "a051e2e8558149d39c3d299f1c5feb83")
+)
 
 SYMBOLS = {
     "XAU/USD (Gold)": {"td": "XAU/USD", "yf": "GC=F", "tv": "OANDA:XAUUSD", "mt5": "XAUUSD"},
