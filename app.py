@@ -1,6 +1,7 @@
 import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
+
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -14,9 +15,28 @@ except ImportError:
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-st.set_page_config(page_title="BIG MAN 2.0 — Pro Price Lesson SMC Bot", page_icon="🪙", layout="wide")
+st.set_page_config(
+    page_title="BIGMAN — Institutional Trading Terminal", 
+    page_icon="⚡", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_tradingview_bot_v46.db")
+# --- MODERN ULTRA-CLEAN CSS STYLING ---
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; color: #f0f2f6; font-family: 'Inter', sans-serif; }
+    .stApp { background: #0e1117; }
+    h1, h2, h3 { font-family: 'Inter', sans-serif; font-weight: 700; letter-spacing: -0.5px; color: #ffffff; }
+    .bigman-header { font-size: 2.2rem; font-weight: 800; background: linear-gradient(90deg, #3b82f6, #10b981); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0px; }
+    .bigman-sub { font-size: 0.95rem; color: #9ca3af; margin-bottom: 20px; font-weight: 500; }
+    .metric-card { background: #1f2937; border: 1px solid #374151; padding: 16px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+    .stButton>button { width: 100%; border-radius: 8px; font-weight: 600; background-color: #2563eb; color: white; border: none; transition: all 0.3s ease; }
+    .stButton>button:hover { background-color: #1d4ed8; box-shadow: 0 0 15px rgba(37, 99, 235, 0.4); }
+    </style>
+""", unsafe_allow_html=True)
+
+DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_institutional_v47.db")
 
 SYMBOLS = {
     "XAU/USD (Gold)": {"tv": "OANDA:XAUUSD", "td": "XAU/USD", "yf": "GC=F", "mt5": "XAUUSD"},
@@ -33,7 +53,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_open_trades_v46 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v47 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -50,7 +70,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v46 (
+        CREATE TABLE IF NOT EXISTS trade_history_v47 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -94,7 +114,7 @@ def get_forex_market_status():
     else:
         return "OPEN", "🟢 International Forex/Gold Market Live"
 
-@st.cache_data(ttl=3, show_spinner=False)
+@st.cache_data(ttl=2, show_spinner=False)
 def get_tradingview_matched_data(symbol_label, interval_label, rows=250):
     info = SYMBOLS[symbol_label]
     cfg = INTERVALS[interval_label]
@@ -259,7 +279,7 @@ def send_mt5_order(symbol_key, bias, lot_size, sl, tp):
         "tp": float(tp),
         "deviation": 20,
         "magic": 999888,
-        "comment": "BigMan2 Pro SMC Bot",
+        "comment": "BIGMAN Institutional Bot",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
@@ -285,10 +305,10 @@ def update_balance(con, delta):
 
 def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, execution_mode="PAPER", market_status="OPEN", allow_weekend_practice=True):
     if market_status != "OPEN" and not allow_weekend_practice:
-        return False, "Market Closed! Enable Weekend Practice Mode in sidebar."
+        return False, "Market Closed! Enable Weekend Practice Mode."
         
     cursor = con.cursor()
-    cursor.execute("SELECT id FROM tv_open_trades_v46 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
+    cursor.execute("SELECT id FROM tv_open_trades_v47 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
     if cursor.fetchone():
         return False, "Is candle par pehle hi trade li ja chuki hai!"
 
@@ -302,7 +322,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, exec
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
-        "INSERT INTO tv_open_trades_v46 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_order_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO tv_open_trades_v47 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_order_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts), mt5_ticket)
     )
     con.commit()
@@ -310,7 +330,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, exec
 
 def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, mt5_order_ticket FROM tv_open_trades_v46 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, mt5_order_ticket FROM tv_open_trades_v47 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
@@ -327,35 +347,44 @@ def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manua
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "INSERT INTO trade_history_v46 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trade_history_v47 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, 2 if is_gold else 5), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM tv_open_trades_v46 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v47 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
 
-# --- STREAMLIT UI DESIGN ---
-st.title("🪙 BIG MAN 2.0 — Pro Price Lesson SMC Bot")
-st.caption("Multi-Timeframe Confluence • Premium/Discount Zones • MT5 & Paper Execution")
+# --- MODERN UI HEADER ---
+st.markdown('<p class="bigman-header">BIGMAN ⚡ Institutional Terminal</p>', unsafe_allow_html=True)
+st.markdown('<p class="bigman-sub">Advanced Price Lesson SMC Confluence Engine & Multi-Broker Execution</p>', unsafe_allow_html=True)
 
 con = connect_db()
 m_status, m_text = get_forex_market_status()
 
+# --- SIDEBAR CONTROL PANEL ---
 with st.sidebar:
-    st.header("⚙️ Control Panel")
+    st.header("🎛️ Control Panel")
+    
+    # 🔄 Market Refresh Button Added Here
+    if st.button("🔄 Refresh Market Data", use_container_width=True):
+        st.cache_data.clear()
+        st.success("Market feeds refreshed successfully!")
+        st.rerun()
+
+    st.markdown("---")
     symbol = st.selectbox("Select Asset", list(SYMBOLS.keys()), index=0)
     timeframe = st.selectbox("Timeframe", list(INTERVALS.keys()), index=0)
     lot_input = st.number_input("Trade Lot Size", min_value=0.01, max_value=5.0, value=0.01, step=0.01)
     
     st.markdown("---")
-    st.subheader("🛠️ Execution Environment")
-    exec_env = st.radio("Target Broker System", ["PAPER TRADING (Demo)", "MT5 LIVE BROKER"], index=0)
+    st.subheader("🛠️ Execution Setup")
+    exec_env = st.radio("Broker Environment", ["PAPER TRADING (Demo)", "MT5 LIVE BROKER"], index=0)
     
     weekend_practice = st.checkbox("Allow Weekend Practice Mode", value=True)
     auto_mode = st.toggle("Enable Auto-Pilot Execution", value=False)
     
-    if st.button("➕ Open BigMan2 Trade", use_container_width=True):
+    if st.button("➕ Execute Manual Order", use_container_width=True):
         df_temp, _ = get_tradingview_matched_data(symbol, timeframe)
         if not df_temp.empty:
             res_temp = evaluate_price_lesson_strategies(df_temp)
@@ -392,21 +421,24 @@ if not df.empty:
     st.markdown(f"### 💵 Account Balance: **${curr_balance:,.2f} USD** {bal_color}")
     
     col1, col2, col3 = st.columns(3)
-    col1.metric("Live Chart Price", f"{current_live_price:.2f}" if is_gold else f"{current_live_price:.5f}")
-    col2.metric("Signal Bias", result["bias"])
-    col3.metric("Confluence Score", f"Bull: {result['bullish']} | Bear: {result['bearish']}")
+    with col1:
+        st.metric("Live Chart Price", f"{current_live_price:.2f}" if is_gold else f"{current_live_price:.5f}")
+    with col2:
+        st.metric("Signal Bias", result["bias"])
+    with col3:
+        st.metric("Confluence Score", f"Bull: {result['bullish']} | Bear: {result['bearish']}")
 
 st.divider()
 
 left, right = st.columns([1.8, 1])
 
 with left:
-    st.subheader(f"📈 Live TradingView Chart ({symbol} - {timeframe})")
+    st.subheader(f"📈 Live TradingView Terminal ({symbol} - {timeframe})")
     tv_symbol = SYMBOLS[symbol]["tv"]
     tv_interval = {"15 min": "15", "1 hour": "60", "4 hours": "240", "1 day": "D"}[timeframe]
     html = f"""
-    <div class="tradingview-widget-container" style="height:480px;width:100%">
-      <div id="tradingview_chart" style="height:460px;width:100%"></div>
+    <div class="tradingview-widget-container" style="height:500px;width:100%">
+      <div id="tradingview_chart" style="height:480px;width:100%"></div>
       <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
       <script type="text/javascript">
       new TradingView.widget({{
@@ -425,12 +457,12 @@ with left:
       </script>
     </div>
     """
-    components.html(html, height=490, scrolling=False)
+    components.html(html, height=510, scrolling=False)
 
 with right:
-    st.subheader("💡 Expert Price Lesson Strategy Confluence")
+    st.subheader("💡 Expert Confluence Breakdown")
     if not df.empty:
-        st.write(f"**Breakdown:** {result['votes']}")
+        st.write(f"**Strategy Breakdown:** {result['votes']}")
         fmt = ".2f" if "XAU" in symbol else ".5f"
         st.write(f"**Stop Loss:** `{result['sl']:{fmt}}` | **Take Profit:** `{result['tp']:{fmt}}`")
         st.markdown(f"*Feed Source: {data_source}*")
@@ -438,7 +470,7 @@ with right:
 st.divider()
 
 st.subheader("📋 Active Open Trades")
-open_df = pd.read_sql_query("SELECT * FROM tv_open_trades_v46 ORDER BY id DESC", con)
+open_df = pd.read_sql_query("SELECT * FROM tv_open_trades_v47 ORDER BY id DESC", con)
 
 if open_df.empty:
     st.info("Abhi koi open trade nahi hai.")
