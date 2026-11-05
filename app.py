@@ -34,7 +34,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_scratch_v50.db")
+DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_scratch_v51.db")
 
 SYMBOLS = {
     "XAU/USD (Gold)": {"td": "XAU/USD", "yf": "GC=F", "mt5": "XAUUSD"},
@@ -51,7 +51,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS open_trades_v50 (
+        CREATE TABLE IF NOT EXISTS open_trades_v51 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -67,7 +67,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v50 (
+        CREATE TABLE IF NOT EXISTS trade_history_v51 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -109,7 +109,6 @@ def fetch_market_candles(symbol_label, interval_label, rows=150):
     info = SYMBOLS[symbol_label]
     cfg = INTERVALS[interval_label]
     
-    # 1. Primary: Yahoo Finance
     try:
         import yfinance as yf
         df = yf.Ticker(info["yf"]).history(period="5d", interval=cfg["yf"])
@@ -122,7 +121,6 @@ def fetch_market_candles(symbol_label, interval_label, rows=150):
     except Exception:
         pass
 
-    # 2. Secondary: Twelve Data API
     td_key = st.secrets.get("TWELVE_DATA_API_KEY", os.getenv("TWELVE_DATA_API_KEY", "demo"))
     try:
         resp = requests.get(
@@ -159,7 +157,6 @@ def evaluate_price_lesson_strategies(df):
     upper_wick = last.high - max(last.open, last.close)
     lower_wick = min(last.open, last.close) - last.low
     
-    # Strategy S7: Premium & Discount Equilibrium (50% Zone)
     swing_high = float(df.high.tail(40).max())
     swing_low = float(df.low.tail(40).min())
     eq_50 = (swing_high + swing_low) / 2.0
@@ -171,25 +168,21 @@ def evaluate_price_lesson_strategies(df):
     else:
         bear_votes.append("Premium Zone (>50% Eq) [Sell Bias]")
 
-    # Strategy S5-FVG: Unmitigated Fair Value Gap Imbalance
     if last.low > p_prev.high and prev.close > prev.open:
         bull_votes.append("Unmitigated Bullish FVG")
     elif last.high < p_prev.low and prev.close < prev.open:
         bear_votes.append("Unmitigated Bearish FVG")
 
-    # Strategy S6: Supply & Demand Wick Rejections
     if lower_wick >= body * 1.5 and last.close > last.open:
         bull_votes.append("Demand Zone Wick Rejection")
     elif upper_wick >= body * 1.5 and last.close < last.open:
         bear_votes.append("Supply Zone Wick Rejection")
 
-    # Strategy S3: 3-Step / Engulfing Confirmation
     if last.close > last.open and prev.close < prev.open and last.open <= prev.close:
         bull_votes.append("Bullish Engulfing Pattern")
     elif last.close < last.open and prev.close > prev.open and last.open >= prev.close:
         bear_votes.append("Bearish Engulfing Pattern")
 
-    # Trend Confluence (Moving Average Filter)
     ma_fast = df.close.rolling(8).mean().iloc[-1]
     ma_slow = df.close.rolling(21).mean().iloc[-1]
     if ma_fast >= ma_slow:
@@ -204,7 +197,6 @@ def evaluate_price_lesson_strategies(df):
     current_close = float(last.close)
     is_gold = current_close > 100
     
-    # 1:3 Risk Reward Ratio for Gross Profit
     sl_buf = max(rng * 2.0, 6.0 if is_gold else 0.0030)
     tp_buf = sl_buf * 3.0
 
@@ -302,7 +294,7 @@ with st.sidebar:
             e_mode = "MT5 LIVE" if "MT5" in exec_env else "PAPER"
             
             cur = con.cursor()
-            cur.execute("SELECT id FROM open_trades_v50 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(ts)))
+            cur.execute("SELECT id FROM open_trades_v51 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(ts)))
             if cur.fetchone():
                 st.sidebar.warning("Is candle par trade already open hai!")
             else:
@@ -315,9 +307,8 @@ with st.sidebar:
                     ticket = tkt
                 
                 ist_time = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
-                utc_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
                 con.execute(
-                    "INSERT INTO open_trades_v50 (created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO open_trades_v51 (created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (ist_time, symbol, timeframe, res_t["entry"], res_t["sl"], res_t["tp"], lot, res_t["bias"], res_t["votes"], str(ts), ticket)
                 )
                 con.commit()
@@ -342,7 +333,7 @@ if not df.empty:
     
     if auto_pilot and (m_status == "OPEN" or weekend_mode):
         cur = con.cursor()
-        cur.execute("SELECT id FROM open_trades_v50 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(ts_now)))
+        cur.execute("SELECT id FROM open_trades_v51 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(ts_now)))
         if not cur.fetchone():
             e_mode = "MT5 LIVE" if "MT5" in exec_env else "PAPER"
             tkt = 0
@@ -352,7 +343,7 @@ if not df.empty:
             
             ist_time = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
             con.execute(
-                "INSERT INTO open_trades_v50 (created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO open_trades_v51 (created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (ist_time, symbol, timeframe, res["entry"], res["sl"], res["tp"], lot, res["bias"], res["votes"], str(ts_now), tkt)
             )
             con.commit()
@@ -368,14 +359,12 @@ if not df.empty:
 
 st.divider()
 
-# --- LIGHTWEIGHT NATIVE PRICE TABLE INSTEAD OF BLOCKED IFRAME ---
 col_left, col_right = st.columns([1.5, 1])
 
 with col_left:
     st.subheader(f"📊 Recent Price Action ({symbol} - {timeframe})")
     st.caption(f"Data Source: {data_src}")
     
-    # Display clean native DataFrame table of last 10 candles (Zero loading issue on mobile)
     display_df = df[["open", "high", "low", "close", "datetime_ist"]].tail(10).copy()
     display_df.columns = ["Open", "High", "Low", "Close", "Time (IST)"]
     st.dataframe(display_df, use_container_width=True)
@@ -386,12 +375,12 @@ with col_right:
         st.write(f"**Strategy Breakdown:** {res['votes']}")
         fmt = ".2f" if is_gold else ".5f"
         st.write(f"**Stop Loss:** `{res['sl']:{fmt}}` | **Take Profit:** `{res['tp']:{fmt}}`")
-        st.markdown(f"[🔗 Open Direct Chart on TradingView](https://www.tradingview.com/chart/?symbol={SYMBOLS[symbol]['td']})")
+        st.markdown(f"[🔗 Open Direct Chart on TradingView](https://www.tradingview.com/chart/?symbol=OANDA:{SYMBOLS[symbol]['td'].replace('/', '')})")
 
 st.divider()
 st.subheader("📋 Active Open Trades")
 
-open_trades = pd.read_sql_query("SELECT * FROM open_trades_v50 ORDER BY id DESC", con)
+open_trades = pd.read_sql_query("SELECT * FROM open_trades_v51 ORDER BY id DESC", con)
 if open_trades.empty:
     st.info("Abhi koi open trade nahi hai.")
 else:
@@ -411,10 +400,10 @@ else:
                 closed_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
                 
                 con.execute(
-                    "INSERT INTO trade_history_v50 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO trade_history_v51 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (row['id'], row['created_at_ist'], closed_ist, row['symbol'], row['timeframe'], row['entry_price'], round(exit_p, 2 if is_gold else 5), row['stop_loss'], row['take_profit'], row['lot_size'], row['bias'], "Manual Close", pnl, row['strategy_votes'])
                 )
-                con.execute("DELETE FROM open_trades_v50 WHERE id = ?", (row['id'],))
+                con.execute("DELETE FROM open_trades_v51 WHERE id = ?", (row['id'],))
                 con.commit()
                 update_bal(con, pnl)
                 st.toast(f"Trade closed! PnL: ${pnl:+.2f}")
