@@ -36,7 +36,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_institutional_v47.db")
+DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_institutional_v48.db")
 
 SYMBOLS = {
     "XAU/USD (Gold)": {"tv": "OANDA:XAUUSD", "td": "XAU/USD", "yf": "GC=F", "mt5": "XAUUSD"},
@@ -53,7 +53,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_open_trades_v47 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v48 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -70,7 +70,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v47 (
+        CREATE TABLE IF NOT EXISTS trade_history_v48 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -308,7 +308,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, exec
         return False, "Market Closed! Enable Weekend Practice Mode."
         
     cursor = con.cursor()
-    cursor.execute("SELECT id FROM tv_open_trades_v47 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
+    cursor.execute("SELECT id FROM tv_open_trades_v48 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
     if cursor.fetchone():
         return False, "Is candle par pehle hi trade li ja chuki hai!"
 
@@ -322,7 +322,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, exec
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
-        "INSERT INTO tv_open_trades_v47 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_order_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO tv_open_trades_v48 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_order_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts), mt5_ticket)
     )
     con.commit()
@@ -330,7 +330,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, exec
 
 def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, mt5_order_ticket FROM tv_open_trades_v47 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, mt5_order_ticket FROM tv_open_trades_v48 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
@@ -347,10 +347,10 @@ def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manua
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "INSERT INTO trade_history_v47 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trade_history_v48 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, 2 if is_gold else 5), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM tv_open_trades_v47 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v48 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
@@ -366,7 +366,6 @@ m_status, m_text = get_forex_market_status()
 with st.sidebar:
     st.header("🎛️ Control Panel")
     
-    # 🔄 Market Refresh Button Added Here
     if st.button("🔄 Refresh Market Data", use_container_width=True):
         st.cache_data.clear()
         st.success("Market feeds refreshed successfully!")
@@ -436,28 +435,14 @@ with left:
     st.subheader(f"📈 Live TradingView Terminal ({symbol} - {timeframe})")
     tv_symbol = SYMBOLS[symbol]["tv"]
     tv_interval = {"15 min": "15", "1 hour": "60", "4 hours": "240", "1 day": "D"}[timeframe]
-    html = f"""
-    <div class="tradingview-widget-container" style="height:500px;width:100%">
-      <div id="tradingview_chart" style="height:480px;width:100%"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-      new TradingView.widget({{
-        "autosize": true,
-        "symbol": "{tv_symbol}",
-        "interval": "{tv_interval}",
-        "timezone": "Asia/Kolkata",
-        "theme": "dark",
-        "style": "1",
-        "locale": "en",
-        "enable_publishing": false,
-        "allow_symbol_change": true,
-        "hide_side_toolbar": false,
-        "container_id": "tradingview_chart"
-      }});
-      </script>
+    
+    # Robust responsive TradingView Advanced Chart Widget HTML with fallback container
+    chart_html = f"""
+    <div style="width:100%;height:500px;background-color:#131722;border-radius:12px;overflow:hidden;border:1px solid #374151;">
+      <iframe src="https://s.tradingview.com/widgetembed/?symbol={tv_symbol}&interval={tv_interval}&hidesidetoolbar=0&hidetoptoolbar=0&symboledit=1&saveimage=1&toolbarbg=131722&studies=[]&theme=dark&style=1&timezone=Asia%2FKolkata&locale=en" width="100%" height="500px" style="border:none;" scrolling="no"></iframe>
     </div>
     """
-    components.html(html, height=510, scrolling=False)
+    components.html(chart_html, height=515, scrolling=False)
 
 with right:
     st.subheader("💡 Expert Confluence Breakdown")
@@ -470,7 +455,7 @@ with right:
 st.divider()
 
 st.subheader("📋 Active Open Trades")
-open_df = pd.read_sql_query("SELECT * FROM tv_open_trades_v47 ORDER BY id DESC", con)
+open_df = pd.read_sql_query("SELECT * FROM tv_open_trades_v48 ORDER BY id DESC", con)
 
 if open_df.empty:
     st.info("Abhi koi open trade nahi hai.")
