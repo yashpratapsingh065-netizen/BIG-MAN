@@ -36,7 +36,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_institutional_v48.db")
+DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_institutional_v49.db")
 
 SYMBOLS = {
     "XAU/USD (Gold)": {"tv": "OANDA:XAUUSD", "td": "XAU/USD", "yf": "GC=F", "mt5": "XAUUSD"},
@@ -53,7 +53,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS tv_open_trades_v48 (
+        CREATE TABLE IF NOT EXISTS tv_open_trades_v49 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -70,7 +70,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v48 (
+        CREATE TABLE IF NOT EXISTS trade_history_v49 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -169,7 +169,6 @@ def evaluate_price_lesson_strategies(df):
     upper_wick = last.high - max(last.open, last.close)
     lower_wick = min(last.open, last.close) - last.low
     
-    # Price Lesson S7: Premium & Discount Zones (50% Equilibrium Model)
     swing_high = float(df.high.tail(50).max())
     swing_low = float(df.low.tail(50).min())
     eq_50 = (swing_high + swing_low) / 2.0
@@ -182,25 +181,21 @@ def evaluate_price_lesson_strategies(df):
     else:
         bearish_votes.append("Premium Zone (>50% Eq) -> Expensive Sell Area")
 
-    # Price Lesson S5-FVG: Unmitigated Fair Value Gap Imbalance
     if last.low > p_prev.high and prev.close > prev.open:
         bullish_votes.append("Unmitigated Bullish FVG Imbalance")
     elif last.high < p_prev.low and prev.close < prev.open:
         bearish_votes.append("Unmitigated Bearish FVG Imbalance")
 
-    # Price Lesson S6: Supply & Demand Wick Rejections
     if lower_wick >= body * 1.5 and last.close > last.open:
         bullish_votes.append("Demand Zone Strong Wick Rejection")
     elif upper_wick >= body * 1.5 and last.close < last.open:
         bearish_votes.append("Supply Zone Strong Wick Rejection")
 
-    # Price Lesson S3: Candlestick Engulfing Patterns
     if last.close > last.open and prev.close < prev.open and last.open <= prev.close and last.close >= prev.open:
         bullish_votes.append("Bullish Engulfing Confirmation")
     elif last.close < last.open and prev.close > prev.open and last.open >= prev.close and last.close <= prev.open:
         bearish_votes.append("Bearish Engulfing Confirmation")
 
-    # Multi-Timeframe / Breakout Confluence
     recent = df.iloc[-21:-1]
     prior_high = float(recent.high.max())
     prior_low = float(recent.low.min())
@@ -209,7 +204,6 @@ def evaluate_price_lesson_strategies(df):
     elif last.close < prior_low:
         bearish_votes.append("Support Low Breakdown")
 
-    # Momentum Confluence via Moving Average
     ma_fast = df.close.rolling(8).mean().iloc[-1]
     ma_slow = df.close.rolling(21).mean().iloc[-1]
     if ma_fast >= ma_slow:
@@ -228,7 +222,6 @@ def evaluate_price_lesson_strategies(df):
     current_close = float(last.close)
     is_gold = current_close > 100
     
-    # Optimized Risk-Reward Ratio (1:3 RRR for gross profit protection)
     sl_buffer = max(rng * 2.0, 6.0 if is_gold else 0.0030)
     tp_buffer = sl_buffer * 3.0
 
@@ -308,7 +301,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, exec
         return False, "Market Closed! Enable Weekend Practice Mode."
         
     cursor = con.cursor()
-    cursor.execute("SELECT id FROM tv_open_trades_v48 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
+    cursor.execute("SELECT id FROM tv_open_trades_v49 WHERE symbol = ? AND timeframe = ? AND candle_timestamp = ?", (symbol, timeframe, str(candle_ts)))
     if cursor.fetchone():
         return False, "Is candle par pehle hi trade li ja chuki hai!"
 
@@ -322,7 +315,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, exec
     created_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     entry_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     con.execute(
-        "INSERT INTO tv_open_trades_v48 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_order_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO tv_open_trades_v49 (created_at_ist, symbol, timeframe, entry_time_utc, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_order_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (created_at_ist, symbol, timeframe, entry_time_utc, result["entry"], result["sl"], result["tp"], lot_size, result["bias"], result["votes"], str(candle_ts), mt5_ticket)
     )
     con.commit()
@@ -330,7 +323,7 @@ def execute_auto_trade(con, symbol, timeframe, result, lot_size, candle_ts, exec
 
 def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manual Close 👤"):
     cursor = con.cursor()
-    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, mt5_order_ticket FROM tv_open_trades_v48 WHERE id = ?", (trade_id,))
+    cursor.execute("SELECT created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, mt5_order_ticket FROM tv_open_trades_v49 WHERE id = ?", (trade_id,))
     row = cursor.fetchone()
     if not row:
         return 0.0
@@ -347,10 +340,10 @@ def close_single_trade(con, trade_id, current_price, is_gold=True, reason="Manua
     closed_at_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
     
     con.execute(
-        "INSERT INTO trade_history_v48 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trade_history_v49 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (trade_id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, round(current_price, 2 if is_gold else 5), sl, tp, lot_size, bias, reason, pnl_usd, strategy_votes)
     )
-    con.execute("DELETE FROM tv_open_trades_v48 WHERE id = ?", (trade_id,))
+    con.execute("DELETE FROM tv_open_trades_v49 WHERE id = ?", (trade_id,))
     con.commit()
     update_balance(con, pnl_usd)
     return pnl_usd
@@ -436,13 +429,16 @@ with left:
     tv_symbol = SYMBOLS[symbol]["tv"]
     tv_interval = {"15 min": "15", "1 hour": "60", "4 hours": "240", "1 day": "D"}[timeframe]
     
-    # Robust responsive TradingView Advanced Chart Widget HTML with fallback container
+    # Direct TradingView Link for Mobile Instant Fallback
+    st.markdown(f"[🔗 Open Direct TradingView Chart for {symbol}](https://www.tradingview.com/chart/?symbol={tv_symbol})")
+    
+    # Fast, Clean & Anti-Block TradingView Embed
     chart_html = f"""
-    <div style="width:100%;height:500px;background-color:#131722;border-radius:12px;overflow:hidden;border:1px solid #374151;">
-      <iframe src="https://s.tradingview.com/widgetembed/?symbol={tv_symbol}&interval={tv_interval}&hidesidetoolbar=0&hidetoptoolbar=0&symboledit=1&saveimage=1&toolbarbg=131722&studies=[]&theme=dark&style=1&timezone=Asia%2FKolkata&locale=en" width="100%" height="500px" style="border:none;" scrolling="no"></iframe>
+    <div style="width:100%;height:480px;background-color:#131722;border-radius:12px;overflow:hidden;border:1px solid #374151;">
+      <iframe src="https://s.tradingview.com/widgetembed/?symbol={tv_symbol}&interval={tv_interval}&hidesidetoolbar=0&hidetoptoolbar=0&symboledit=1&saveimage=1&toolbarbg=131722&theme=dark&style=1&timezone=Asia%2FKolkata&locale=en" width="100%" height="480px" frameborder="0" scrolling="no" allowtransparency="true"></iframe>
     </div>
     """
-    components.html(chart_html, height=515, scrolling=False)
+    components.html(chart_html, height=490, scrolling=False)
 
 with right:
     st.subheader("💡 Expert Confluence Breakdown")
@@ -455,7 +451,7 @@ with right:
 st.divider()
 
 st.subheader("📋 Active Open Trades")
-open_df = pd.read_sql_query("SELECT * FROM tv_open_trades_v48 ORDER BY id DESC", con)
+open_df = pd.read_sql_query("SELECT * FROM tv_open_trades_v49 ORDER BY id DESC", con)
 
 if open_df.empty:
     st.info("Abhi koi open trade nahi hai.")
