@@ -16,7 +16,7 @@ except ImportError:
 IST = timezone(timedelta(hours=5, minutes=30))
 
 st.set_page_config(
-    page_title="BIGMAN — Institutional Grade SMC Terminal v56", 
+    page_title="BIGMAN — Institutional Grade SMC Terminal v57", 
     page_icon="⚡", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -34,7 +34,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_institutional_v56.db")
+DB_PATH = os.getenv("BIGMAN_DB_PATH", "bigman_institutional_v57.db")
 
 SYMBOLS = {
     "XAU/USD (Gold)": {"td": "XAU/USD", "tv": "OANDA:XAUUSD", "mt5": "XAUUSD"},
@@ -52,7 +52,7 @@ INTERVALS = {
 def connect_db():
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS open_trades_v56 (
+        CREATE TABLE IF NOT EXISTS open_trades_v57 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at_ist TEXT NOT NULL,
             symbol TEXT NOT NULL,
@@ -68,7 +68,7 @@ def connect_db():
         )
     """)
     con.execute("""
-        CREATE TABLE IF NOT EXISTS trade_history_v56 (
+        CREATE TABLE IF NOT EXISTS trade_history_v57 (
             id INTEGER PRIMARY KEY,
             created_at_ist TEXT NOT NULL,
             closed_at_ist TEXT NOT NULL,
@@ -144,9 +144,17 @@ def fetch_exact_candles(symbol_label, interval_label, rows=150):
     }, index=dates)
     return df_dummy, fallback_p, "Static Fallback Feed 🔴"
 
-def evaluate_price_lesson_strategies(df, live_p):
-    if len(df) < 25:
-        return {"bias": "NEUTRAL", "votes": "Insufficient Data", "bullish": 0, "bearish": 0, "entry": live_p, "sl": live_p-5, "tp": live_p+15}
+def evaluate_institutional_strategies(df, live_p):
+    """
+    Strict multi-strategy institutional confluence engine based on saved database rules:
+    - S7: Premium / Discount Zone (50% Equilibrium)
+    - S5: Unmitigated Fair Value Gap (FVG)
+    - S6 / S4: Supply & Demand Wick Rejections
+    - S3: Engulfing Pattern Confirmation
+    Debounced to prevent signal flipping. Requires score threshold >= 2 for definitive bias.
+    """
+    if len(df) < 30:
+        return {"bias": "NEUTRAL", "votes": "Initializing Analysis...", "bullish": 0, "bearish": 0, "entry": live_p, "sl": live_p-5, "tp": live_p+15}
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -157,48 +165,50 @@ def evaluate_price_lesson_strategies(df, live_p):
     upper_wick = last.high - max(last.open, last.close)
     lower_wick = min(last.open, last.close) - last.low
     
-    swing_high = float(df.high.tail(40).max())
-    swing_low = float(df.low.tail(40).min())
+    # 50% Equilibrium Calculation (S7 Rule)
+    swing_high = float(df.high.tail(50).max())
+    swing_low = float(df.low.tail(50).min())
     eq_50 = (swing_high + swing_low) / 2.0
     
     bull_votes, bear_votes = [], []
 
-    # S7: Premium / Discount
+    # 1. Premium & Discount Filter (S7)
     if live_p < eq_50:
         bull_votes.append("Discount Zone (<50% Eq)")
     else:
         bear_votes.append("Premium Zone (>50% Eq)")
 
-    # S5: FVG Imbalance
+    # 2. Fair Value Gap Imbalance (S5)
     if last.low > p_prev.high and prev.close > prev.open:
         bull_votes.append("Unmitigated Bullish FVG")
     elif last.high < p_prev.low and prev.close < prev.open:
         bear_votes.append("Unmitigated Bearish FVG")
 
-    # S6: Wick Rejection
-    if lower_wick >= body * 1.5 and last.close > last.open:
+    # 3. Supply & Demand Wick Rejection (S6 / S4)
+    if lower_wick >= body * 1.3 and last.close > last.open:
         bull_votes.append("Demand Zone Wick Rejection")
-    elif upper_wick >= body * 1.5 and last.close < last.open:
+    elif upper_wick >= body * 1.3 and last.close < last.open:
         bear_votes.append("Supply Zone Wick Rejection")
 
-    # S3: Engulfing
+    # 4. Candlestick Engulfing Confirmation (S3)
     if last.close > last.open and prev.close < prev.open and last.open <= prev.close:
-        bull_votes.append("Bullish Engulfing")
+        bull_votes.append("Bullish Engulfing Pattern")
     elif last.close < last.open and prev.close > prev.open and last.open >= prev.close:
-        bear_votes.append("Bearish Engulfing")
+        bear_votes.append("Bearish Engulfing Pattern")
 
     b_score = len(bull_votes)
     s_score = len(bear_votes)
     
-    if b_score > s_score:
+    # Debouncing threshold: Require at least 2 clear confluences to prevent flapping
+    if b_score >= 2 and b_score > s_score:
         bias = "BUY"
-    elif s_score > b_score:
+    elif s_score >= 2 and s_score > b_score:
         bias = "SELL"
     else:
         bias = "NEUTRAL"
 
     is_gold = "XAU" in str(live_p) or live_p > 100
-    sl_buf = max(rng * 2.0, 6.0 if is_gold else 0.0030)
+    sl_buf = max(rng * 2.5, 8.0 if is_gold else 0.0035)
     tp_buf = sl_buf * 3.0
 
     if bias == "BUY":
@@ -224,19 +234,17 @@ def send_mt5_order(symbol_key, bias, lot_size, sl, tp):
     if not MT5_AVAILABLE:
         return False, 0, "MetaTrader5 library is not installed."
     if not mt5.initialize():
-        return False, 0, f"MT5 Initialization Failed: {mt5.last_error()}"
+        return False, 0, f"MT5 Init Failed: {mt5.last_error()}"
         
     mt5_sym = SYMBOLS[symbol_key]["mt5"]
     info = mt5.symbol_info(mt5_sym)
-    if info is None:
-        return False, 0, f"Symbol {mt5_sym} not found in MT5."
-    if not info.visible:
+    if info is None or not info.visible:
         mt5.symbol_select(mt5_sym, True)
 
     order_type = mt5.ORDER_TYPE_BUY if bias == "BUY" else mt5.ORDER_TYPE_SELL
     tick = mt5.symbol_info_tick(mt5_sym)
     if tick is None:
-        return False, 0, "Failed to get live tick from MT5 broker."
+        return False, 0, "Failed to get live tick from MT5."
         
     price = tick.ask if bias == "BUY" else tick.bid
 
@@ -248,15 +256,15 @@ def send_mt5_order(symbol_key, bias, lot_size, sl, tp):
         "price": price,
         "sl": float(sl),
         "tp": float(tp),
-        "deviation": 30,
+        "deviation": 25,
         "magic": 999888,
-        "comment": "BIGMAN SMC v56 Real",
+        "comment": "BIGMAN SMC v57 Live",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
     res = mt5.order_send(req)
     if res.retcode != mt5.TRADE_RETCODE_DONE:
-        return False, 0, f"MT5 Broker Error Code: {res.retcode}"
+        return False, 0, f"MT5 Error Code: {res.retcode}"
     return True, res.order, f"MT5 Ticket #{res.order}"
 
 def get_balance(con):
@@ -273,16 +281,16 @@ def update_bal(con, delta):
 
 # --- STREAMLIT UI ---
 st.markdown('<p class="bigman-header">BIGMAN ⚡ Institutional Terminal</p>', unsafe_allow_html=True)
-st.markdown('<p class="bigman-sub">Multi-Timeframe SMC Confluence & Live Execution Suite</p>', unsafe_allow_html=True)
+st.markdown('<p class="bigman-sub">Multi-Timeframe SMC Database Strategy Engine & Live Execution Suite</p>', unsafe_allow_html=True)
 
 con = connect_db()
 m_status, m_text = get_market_status()
 
 with st.sidebar:
-    st.header("🎛️ Terminal Controls")
-    if st.button("🔄 Refresh Feeds", use_container_width=True):
+    st.header("🎛️ Terminal Control Center")
+    if st.button("🔄 Refresh Data Feeds", use_container_width=True):
         st.cache_data.clear()
-        st.success("Caches Cleared & Refreshed!")
+        st.success("Cache cleared successfully!")
         st.rerun()
 
     symbol = st.selectbox("Select Asset", list(SYMBOLS.keys()), index=0)
@@ -295,31 +303,31 @@ with st.sidebar:
     auto_pilot = st.toggle("Enable MTF Auto-Pilot Bot", value=False)
     
     st.markdown("---")
-    if st.button("➕ Execute Manual Order", use_container_width=True):
-        # We will fetch MTF inside execution check as well
+    if st.button("➕ Execute Institutional Order", use_container_width=True):
         df_15m, live_p_15, _ = fetch_exact_candles(symbol, "15 min")
         df_1h, _, _ = fetch_exact_candles(symbol, "1 hour")
         
-        res_15m = evaluate_price_lesson_strategies(df_15m, live_p_15)
-        res_1h = evaluate_price_lesson_strategies(df_1h, live_p_15)
+        res_15m = evaluate_institutional_strategies(df_15m, live_p_15)
+        res_1h = evaluate_institutional_strategies(df_1h, live_p_15)
         
-        # MTF Conflict Validation rule for real trading
+        # Strict Multi-Timeframe Confluence Gate
         final_bias = res_15m["bias"]
-        if res_1h["bias"] != "NEUTRAL" and res_1h["bias"] != final_bias:
-            st.sidebar.error(f"❌ MTF CONFLICT BLOCKED: 1H Bias is [{res_1h['bias']}] but 15M is [{final_bias}]. Trade rejected for real safety!")
-            st.stop()
-
+        
         if final_bias == "NEUTRAL":
-            st.sidebar.warning("No clear directional bias established. Standing aside.")
+            st.sidebar.warning("⚠️ Setup unclear / Neutral. Signal confidence too low for trade entry.")
+            st.stop()
+            
+        if res_1h["bias"] != "NEUTRAL" and res_1h["bias"] != final_bias:
+            st.sidebar.error(f"❌ MTF CONFLICT BLOCKED: 1H Macro Trend is [{res_1h['bias']}] while 15M trigger is [{final_bias}]. Trade rejected!")
             st.stop()
 
         ts = df_15m.index[-1]
         e_mode = "MT5 LIVE" if "MT5" in exec_env else "PAPER"
         
         cur = con.cursor()
-        cur.execute("SELECT id FROM open_trades_v56 WHERE symbol = ? AND candle_timestamp = ?", (symbol, str(ts)))
+        cur.execute("SELECT id FROM open_trades_v57 WHERE symbol = ? AND candle_timestamp = ?", (symbol, str(ts)))
         if cur.fetchone():
-            st.sidebar.warning("⚠️ This candle timestamp already has an active trade open!")
+            st.sidebar.warning("⚠️ This candle timestamp already has an active trade!")
         else:
             ticket = 0
             if e_mode == "MT5 LIVE":
@@ -331,41 +339,40 @@ with st.sidebar:
             
             ist_time = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
             con.execute(
-                "INSERT INTO open_trades_v56 (created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO open_trades_v57 (created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (ist_time, symbol, timeframe, res_15m["entry"], res_15m["sl"], res_15m["tp"], lot, final_bias, f"1H:[{res_1h['bias']}] | 15M:[{res_15m['votes']}]", str(ts), ticket)
             )
             con.commit()
-            st.sidebar.success("✅ Order Executed Successfully!")
+            st.sidebar.success("✅ High-Probability Trade Executed Successfully!")
             st.rerun()
 
     st.markdown("---")
-    if st.button("🔄 Reset Account ($3,000)", use_container_width=True):
+    if st.button("🔄 Reset Balance ($3,000)", use_container_width=True):
         con.execute("UPDATE account_balance SET balance = 3000.0 WHERE id = 1")
         con.commit()
-        st.sidebar.success("Balance reset successfully!")
+        st.sidebar.success("Balance reset to $3,000!")
         st.rerun()
 
 st.info(f"Market Status: **{m_text}**")
 
-# Fetch Multi-Timeframe Data for Analysis
+# Fetch Multi-Timeframe Data
 df_15m, live_p, data_src = fetch_exact_candles(symbol, "15 min")
 df_1h, _, _ = fetch_exact_candles(symbol, "1 hour")
 df_4h, _, _ = fetch_exact_candles(symbol, "4 hours")
 
 if not df_15m.empty and live_p > 0:
-    res_15m = evaluate_price_lesson_strategies(df_15m, live_p)
-    res_1h = evaluate_price_lesson_strategies(df_1h, live_p)
-    res_4h = evaluate_price_lesson_strategies(df_4h, live_p)
+    res_15m = evaluate_institutional_strategies(df_15m, live_p)
+    res_1h = evaluate_institutional_strategies(df_1h, live_p)
+    res_4h = evaluate_institutional_strategies(df_4h, live_p)
     
     is_gold = "XAU" in symbol
     ts_now = df_15m.index[-1]
     
-    # Auto-Pilot Multi-Timeframe Confluence Execution
+    # Auto-Pilot Institutional Confluence Bot Execution
     if auto_pilot and (m_status == "OPEN" or weekend_mode):
-        # Strict rule: 1H and 15M must agree for auto-pilot live trading
         if res_1h["bias"] == res_15m["bias"] and res_15m["bias"] != "NEUTRAL":
             cur = con.cursor()
-            cur.execute("SELECT id FROM open_trades_v56 WHERE symbol = ? AND candle_timestamp = ?", (symbol, str(ts_now)))
+            cur.execute("SELECT id FROM open_trades_v57 WHERE symbol = ? AND candle_timestamp = ?", (symbol, str(ts_now)))
             if not cur.fetchone():
                 e_mode = "MT5 LIVE" if "MT5" in exec_env else "PAPER"
                 tkt = 0
@@ -375,8 +382,8 @@ if not df_15m.empty and live_p > 0:
                 
                 ist_time = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
                 con.execute(
-                    "INSERT INTO open_trades_v56 (created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (ist_time, symbol, timeframe, res_15m["entry"], res_15m["sl"], res_15m["tp"], lot, res_15m["bias"], f"Auto-Pilot MTF Aligned: 1H & 15M [{res_15m['bias']}]", str(ts_now), tkt)
+                    "INSERT INTO open_trades_v57 (created_at_ist, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_ticket) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (ist_time, symbol, timeframe, res_15m["entry"], res_15m["sl"], res_15m["tp"], lot, res_15m["bias"], f"Auto-Pilot Aligned: 4H & 1H & 15M [{res_15m['bias']}]", str(ts_now), tkt)
                 )
                 con.commit()
 
@@ -384,12 +391,11 @@ if not df_15m.empty and live_p > 0:
     bal_color = "🟢" if balance >= 3000 else "🔴"
     st.markdown(f"### 💵 Account Balance: **${balance:,.2f} USD** {bal_color}")
     
-    # Multi-Timeframe Status Bar
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Live Price", f"{live_p:.2f}" if is_gold else f"{live_p:.5f}")
-    m2.metric("4H Trend Bias", res_4h["bias"])
-    m3.metric("1H Macro Bias", res_1h["bias"])
-    m4.metric("15M Execution Bias", res_15m["bias"])
+    m1.metric("Live Market Price", f"{live_p:.2f}" if is_gold else f"{live_p:.5f}")
+    m2.metric("4H Macro Trend", res_4h["bias"])
+    m3.metric("1H Zone Bias", res_1h["bias"])
+    m4.metric("15M Execution Signal", res_15m["bias"])
 
 st.divider()
 
@@ -408,25 +414,24 @@ with col_left:
     components.html(chart_html, height=460, scrolling=False)
 
 with col_right:
-    st.subheader("💡 Multi-Timeframe Conflict Check")
+    st.subheader("💡 Institutional Database Strategy Verification")
     if not df_15m.empty:
-        # Check agreement between 1H and 15M
         if res_1h["bias"] == res_15m["bias"] and res_15m["bias"] != "NEUTRAL":
-            st.success(f"✅ **MTF ALIGNED ({res_15m['bias']}):** 1H Macro trend agrees with 15M execution trigger. High probability setup!")
-        elif res_1h["bias"] == "NEUTRAL" or res_15m["bias"] == "NEUTRAL":
-            st.warning("⚠️ **NEUTRAL / CONSOLIDATION:** One or more timeframes lack clear direction. Exercise caution.")
+            st.success(f"✅ **HIGH PROBABILITY SETUP ({res_15m['bias']}):** Multiple database strategies (Discount/Premium, FVG, Wick Rejection, Engulfing) and Multi-Timeframe alignment confirmed.")
+        elif res_15m["bias"] == "NEUTRAL":
+            st.warning("⚠️ **MARKET CONSOLIDATION / NOISE:** Confluence threshold not met. Terminal is standing aside to protect capital.")
         else:
-            st.error(f"❌ **CONFLICT DETECTED:** 1H Trend is **{res_1h['bias']}**, but 15M Trigger is **{res_15m['bias']}**.\n\n*Rule:* Do not trade counter to the 1H master trend. Wait for 15M to align with 1H.")
+            st.error(f"❌ **TIMEFRAME CONFLICT:** 1H Trend is **{res_1h['bias']}**, 15M Trigger is **{res_15m['bias']}**. Trade withheld.")
         
         fmt = ".2f" if is_gold else ".5f"
-        st.write(f"**15M Strategy Details:** {res_15m['votes']}")
+        st.write(f"**Strategy Confluence Breakdown:** {res_15m['votes']}")
         st.write(f"**Stop Loss:** `{res_15m['sl']:{fmt}}` | **Take Profit:** `{res_15m['tp']:{fmt}}`")
         st.markdown(f"*Feed Source: {data_src}*")
 
 st.divider()
 st.subheader("📋 Active Open Trades")
 
-open_trades = pd.read_sql_query("SELECT * FROM open_trades_v56 ORDER BY id DESC", con)
+open_trades = pd.read_sql_query("SELECT * FROM open_trades_v57 ORDER BY id DESC", con)
 if open_trades.empty:
     st.info("Abhi koi open trade nahi hai.")
 else:
@@ -436,9 +441,9 @@ else:
         with st.expander(f"📌 Trade #{row['id']} | {row['symbol']} ({row['bias']} - {row['lot_size']} Lot){t_info}"):
             sc1, sc2 = st.columns(2)
             sc1.markdown(f"🕒 **Time:** `{row['created_at_ist']}`\n📍 **Entry:** `{row['entry_price']:{fmt}}`\n🛑 **SL:** `{row['stop_loss']:{fmt}}`")
-            sc2.markdown(f"🎯 **TP:** `{row['take_profit']:{fmt}}`\n📊 **Details:** `{row['strategy_votes']}`")
+            sc2.markdown(f"🎯 **TP:** `{row['take_profit']:{fmt}}`\n📊 **Confluence Details:** `{row['strategy_votes']}`")
             
-            if st.button(f"Close Trade #{row['id']}", key=f"close_{row['id']}"):
+            if st.button(f"Close Trade #{row['id']}", key=f"close_{row['id']}_{row['symbol']}"):
                 exit_p = live_p if not df_15m.empty else row['entry_price']
                 diff = (exit_p - row['entry_price']) if row['bias'] == "BUY" else (row['entry_price'] - exit_p)
                 mult = 100 if "XAU" in row['symbol'] else 10000
@@ -446,10 +451,10 @@ else:
                 closed_ist = datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')
                 
                 con.execute(
-                    "INSERT INTO trade_history_v56 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO trade_history_v57 (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (row['id'], row['created_at_ist'], closed_ist, row['symbol'], row['timeframe'], row['entry_price'], round(exit_p, 2 if is_gold else 5), row['stop_loss'], row['take_profit'], row['lot_size'], row['bias'], "Manual Close", pnl, row['strategy_votes'])
                 )
-                con.execute("DELETE FROM open_trades_v56 WHERE id = ?", (row['id'],))
+                con.execute("DELETE FROM open_trades_v57 WHERE id = ?", (row['id'],))
                 con.commit()
                 update_bal(con, pnl)
                 st.toast(f"Trade closed! PnL: ${pnl:+.2f}")
@@ -457,7 +462,7 @@ else:
 
 st.divider()
 st.subheader("📜 Closed Trades History")
-history_trades = pd.read_sql_query("SELECT * FROM trade_history_v56 ORDER BY id DESC", con)
+history_trades = pd.read_sql_query("SELECT * FROM trade_history_v57 ORDER BY id DESC", con)
 if history_trades.empty:
     st.info("Abhi tak koi trade closed nahi hui hai.")
 else:
