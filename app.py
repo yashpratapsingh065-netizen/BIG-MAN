@@ -213,7 +213,7 @@ def candle_signals(a, b):
     return {
         "doji": body / rng <= 0.12,
         "bull_engulf": a.close > a.open and b.close < b.open and a.open <= b.close and a.close >= b.open,
-        "bear_engulf": a.close < a.open and b.close > b.open and a.open >= b.close and a.close <= b.open,
+        "bear_engulf": a.close < a.open and b.close > b.open and a.open >= b.close and a.open <= b.open,
         "hammer": lower >= 2 * body and upper <= max(body, 0.15 * rng) and a.close > a.open,
         "shooting": upper >= 2 * body and lower <= max(body, 0.15 * rng) and a.close < a.open
     }
@@ -233,7 +233,6 @@ def analyze_active_execution(d15, quote):
     
     bull, bear = [], []
     
-    # Active Momentum & S1-S5 Structure Check
     if a.close > a.ema20:
         bull.append("S1/S2 Momentum: Price is trading above EMA20")
     else:
@@ -244,7 +243,6 @@ def analyze_active_execution(d15, quote):
     else:
         bear.append("S4 Trend: Bearish alignment with EMA50")
         
-    # S7 Premium/Discount & S6/S9 Supply & Demand
     if quote < eq:
         bull.append("S7 Zone: Discount area favoring Buy/Demand setups")
     else:
@@ -255,9 +253,6 @@ def analyze_active_execution(d15, quote):
     if pat["bear_engulf"] or pat["shooting"]:
         bear.append("S3/S6 Price Action: Bearish candlestick confirmation pattern detected")
 
-    bs, ss = len(bull), len(bear)
-    
-    # Active Execution Decision Engine
     if pat["bull_engulf"] or pat["hammer"] or (a.close > a.ema20 and quote < eq):
         bias = "BUY"
     elif pat["bear_engulf"] or pat["shooting"] or (a.close < a.ema20 and quote >= eq):
@@ -338,7 +333,7 @@ def paper_pnl(row, exit_price, asset):
 
 # ---------------- STREAMLIT UI ----------------
 st.markdown('<div class="bh">BIGMAN ⚡ Price Lesson SMC Terminal Pro</div>', unsafe_allow_html=True)
-st.caption("Verified quotes • completed candles • S1–S9 strategy framework • IST • Ready for Live Trading")
+st.caption("Verified quotes • completed candles • S1–S9 strategy framework • IST • Instant Reversal Engine Active")
 
 c = db_open()
 
@@ -370,7 +365,7 @@ with st.sidebar:
     st.divider()
     mode = st.radio("Execution Mode", ["PAPER TRADING (Demo)", "MT5 LIVE BROKER"], index=0)
     live_ok = st.checkbox("I confirm real broker orders in MT5 LIVE mode", False)
-    auto = st.toggle("Auto-pilot (Active Execution)", True)
+    auto = st.toggle("Auto-pilot (Instant Reversal Active)", True)
     auto_live = st.checkbox("Also authorize live auto-pilot orders", False)
     if st.button("🔄 Reset Paper Balance ($3,000)"):
         c.execute("UPDATE account_balance SET balance=3000 WHERE id=1")
@@ -399,7 +394,7 @@ m1.metric("Provider Live Bid", price_fmt(bid, asset))
 m2.metric("Provider Ask", price_fmt(ask, asset))
 m3.metric("Paper Balance", f"${bal:,.2f}")
 m4.metric("Active Signal", final)
-st.caption(f"Feed: {source} · Active execution engine ready for Monday.")
+st.caption(f"Feed: {source} · Active reversal engine ready for Monday.")
 
 if final == "BUY": 
     st.success("🟢 BUY Signal Active")
@@ -415,24 +410,45 @@ with st.expander("📊 Live Strategy Execution Breakdown", expanded=True):
     st.markdown("**Bearish Signals:**")
     for x in det.get("bear", []): st.write("🔴 " + x)
 
+# --- INSTANT REVERSAL & AUTO-EXECUTION ENGINE ---
 if st.session_state.get("execute_now", False) or auto:
     st.session_state["execute_now"] = False
-    if r15["sl"] is not None:
-        ts = str(d15.index[-1]) if not d15.empty else "live"
-        exists = c.execute("SELECT id FROM open_trades_v72 WHERE symbol=? AND candle_timestamp=?", (asset, ts)).fetchone()
-        if not exists:
+    if final in ["BUY", "SELL"] and r15["sl"] is not None:
+        ts = str(d15.index[-1]) if not d15.empty else str(time.time())
+        open_pos = c.execute("SELECT * FROM open_trades_v72 WHERE symbol=?", (asset,)).fetchone()
+        
+        # If an open position exists but the signal flipped, close early and reverse
+        if open_pos and open_pos["bias"] != final:
+            pnl = paper_pnl(open_pos, bid, asset)
+            c.execute("""INSERT INTO trade_history_v72 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (open_pos["id"], open_pos["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), 
+                 asset, tf, open_pos["entry_price"], bid, open_pos["stop_loss"], open_pos["take_profit"], 
+                 open_pos["lot_size"], open_pos["bias"], f"Signal Reversal to {final}", pnl, open_pos["strategy_votes"]))
+            c.execute("DELETE FROM open_trades_v72 WHERE id=?", (open_pos["id"],))
+            c.execute("UPDATE account_balance SET balance=balance+? WHERE id=1", (pnl,))
+            c.commit()
+            
             ticket = 0
             env = "PAPER"
-            if mode == "MT5 LIVE BROKER" and live_ok:
+            if mode == "MT5 LIVE BROKER" and live_ok and auto_live:
                 ok, ticket, msg = send_live_order(asset, final, lot, r15["sl"], r15["tp"])
-                if ok: 
-                    env = "LIVE"
-                    st.success(msg)
-                else: 
-                    st.error(msg)
-            if env == "PAPER" or (mode == "MT5 LIVE BROKER" and ticket):
+                if ok: env = "LIVE"
+            open_trade(c, asset, tf, r15, lot, ts, env, ticket)
+            st.toast(f"Reversed position! Closed #{open_pos['id']} & opened new {final} trade.")
+            st.rerun()
+
+        # If no open position exists for this asset, open one
+        elif not open_pos:
+            exists_candle = c.execute("SELECT id FROM open_trades_v72 WHERE symbol=? AND candle_timestamp=?", (asset, ts)).fetchone()
+            if not exists_candle:
+                ticket = 0
+                env = "PAPER"
+                if mode == "MT5 LIVE BROKER" and live_ok and auto_live:
+                    ok, ticket, msg = send_live_order(asset, final, lot, r15["sl"], r15["tp"])
+                    if ok: env = "LIVE"
                 open_trade(c, asset, tf, r15, lot, ts, env, ticket)
-                st.toast(f"{env} trade executed automatically for {asset}!")
+                st.toast(f"{env} auto-trade executed for {asset} ({final})!")
+                st.rerun()
 
 st.divider()
 left, right = st.columns([1.5, 1])
