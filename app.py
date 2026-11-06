@@ -219,12 +219,12 @@ def candle_signals(a, b):
     return {
         "doji": body / rng <= 0.12,
         "bull_engulf": a.close > a.open and b.close < b.open and a.open <= b.close and a.close >= b.open,
-        "bear_engulf": a.close < a.open and b.close > b.open and a.open >= b.close and a.close <= b.open,
+        "bear_engulf": a.close < a.open and b.close > b.open and a.open >= b.close and a.open <= b.open,
         "hammer": lower >= 2 * body and upper <= max(body, 0.15 * rng) and a.close > a.open,
         "shooting": upper >= 2 * body and lower <= max(body, 0.15 * rng) and a.close < a.open
     }
 
-def analyze(d, quote, aggressive_mode=False):
+def analyze(d, quote, aggressive_mode=True):
     if d is None or len(d) < 30:
         return {"bias": "WAIT", "votes": ["Need completed candles"], "entry": quote, "sl": None, "tp": None, "rr": None, "details": {}}
     
@@ -240,7 +240,7 @@ def analyze(d, quote, aggressive_mode=False):
     pat = candle_signals(a, b)
     bull, bear, wait = [], [], []
     
-    # Structure & Momentum
+    # 1. Structure & Momentum (S1/S2/S4)
     trend = "RANGE"
     if len(ph) >= 2 and len(pl) >= 2:
         if ph[-1][1] > ph[-2][1] and pl[-1][1] > pl[-2][1]: 
@@ -252,40 +252,37 @@ def analyze(d, quote, aggressive_mode=False):
         bull.append("S1/S2 Price above EMA20 (Bullish Momentum)")
     if a.close < a.ema20: 
         bear.append("S1/S2 Price below EMA20 (Bearish Momentum)")
-        
-    if a.close < a.ema20 and a.ema20 < a.ema50:
-        bear.append("S4 Bearish EMA alignment (EMA20 < EMA50)")
-    elif a.close > a.ema20 and a.ema20 > a.ema50:
-        bull.append("S4 Bullish EMA alignment (EMA20 > EMA50)")
 
-    # S7 Premium / Discount Check
+    # 2. Premium / Discount Location (S7)
     premium = quote >= eq
     discount = quote < eq
     if premium: 
-        bear.append("S7 Premium Zone (Favorable for Sell setups)")
+        bear.append("S7 Premium Zone (Favorable for Sell)")
     if discount: 
-        bull.append("S7 Discount Zone (Favorable for Buy setups)")
+        bull.append("S7 Discount Zone (Favorable for Buy / Demand)")
 
-    # Candle Patterns & Retests
-    if pat["bear_engulf"] or pat["shooting"]:
-        bear.append("S3/S4 Bearish candle rejection pattern")
-    if pat["bull_engulf"] or pat["hammer"]:
-        bull.append("S3/S4 Bullish candle confirmation pattern")
+    # 3. Supply & Demand Zones & Price Action Matching (S3/S6/S9)
+    # Check if price is near recent swing low (Demand zone / Support) or showing bullish confirmation
+    near_support = abs(quote - slw) <= (span * 0.03) or discount
+    near_resistance = abs(quote - sh) <= (span * 0.03) or premium
+
+    if near_support and (pat["bull_engulf"] or pat["hammer"] or pat["doji"] or a.close > b.high):
+        bull.append("S6/S9 Demand Zone Rebound + Bullish Price Action Confirmed")
+    if near_resistance and (pat["bear_engulf"] or pat["shooting"] or pat["doji"] or a.close < b.low):
+        bear.append("S6/S9 Supply Zone Rejection + Bearish Price Action Confirmed")
 
     bs, ss = len(bull), len(bear)
     bias = "WAIT"
     
-    # Decision Engine: If aggressive mode is enabled, respect immediate momentum/structure
-    if aggressive_mode:
-        if ss > bs or (a.close < a.ema20 and premium):
+    # Intelligent Bias Selection based on Price Action & Supply/Demand Alignment
+    if near_support and (pat["bull_engulf"] or pat["hammer"] or discount) and bs >= ss:
+        bias = "BUY"
+    elif near_resistance and (pat["bear_engulf"] or pat["shooting"] or premium) and ss >= bs:
+        bias = "SELL"
+    elif aggressive_mode:
+        if ss > bs and a.close < a.ema20:
             bias = "SELL"
-        elif bs > ss or (a.close > a.ema20 and discount):
-            bias = "BUY"
-    else:
-        # Standard intelligent rule
-        if ss >= 2 and a.close < a.ema20:
-            bias = "SELL"
-        elif bs >= 2 and a.close > a.ema20:
+        elif bs > ss and a.close > a.ema20:
             bias = "BUY"
 
     entry = float(quote)
@@ -374,7 +371,7 @@ with st.sidebar:
     provider = st.selectbox("Price Provider", ["Auto (MT5 first)", "MetaTrader 5", "Twelve Data"])
     
     st.divider()
-    aggressive_mode = st.toggle("⚡ Active Trend-Following Mode", value=True, help="When enabled, bot analyzes chart momentum & premium/discount zones to catch active Sell/Buy moves instead of waiting for strict multi-family filters.")
+    aggressive_mode = st.toggle("⚡ Active Supply/Demand & PA Matcher", value=True, help="When enabled, bot scans S6/S9 Supply & Demand zones and price action triggers (engulfing/retests) to capture bounces.")
     
     lot = st.number_input("Lot Size", 0.01, 10.0, 0.01, 0.01)
     st.divider()
@@ -390,7 +387,7 @@ with st.sidebar:
         st.session_state["execute_now"] = True
 
 try:
-    with st.spinner("Analyzing chart structure & price action..."):
+    with st.spinner("Analyzing Supply & Demand zones & Price Action..."):
         chart, bid, ask, source, mt5_info = market_data(asset, tf, provider)
         d15 = cached_twelve_data(ASSETS[asset]["td"], TFS[tf][2], API_KEY)
         dd = cached_twelve_data(ASSETS[asset]["td"], "1day", API_KEY)
@@ -405,7 +402,6 @@ if len(d15) < 30:
     st.error("Not enough completed candles from provider; no signal.")
     st.stop()
 
-# Run chart analysis with dynamic active mode
 r15 = analyze(d15, bid, aggressive_mode=aggressive_mode)
 final = r15["bias"]
 
@@ -415,22 +411,22 @@ m1.metric("Provider Live Bid", price_fmt(bid, asset))
 m2.metric("Provider Ask", price_fmt(ask, asset))
 m3.metric("Paper Balance", f"${bal:,.2f}")
 m4.metric("Active Signal", final)
-st.caption(f"Feed: {source} · Real-time page chart analysis active.")
+st.caption(f"Feed: {source} · S6/S9 Supply & Demand and Price Action matching active.")
 
 if final == "BUY": 
-    st.success("🟢 BUY Candidate Detected")
+    st.success("🟢 BUY Candidate Detected (Demand Zone Bounce)")
 elif final == "SELL": 
-    st.error("🔴 SELL Candidate Detected (Active Trend Move)")
+    st.error("🔴 SELL Candidate Detected (Supply Zone Rejection)")
 else: 
-    st.warning("🟡 WAIT — Market consolidating")
+    st.warning("🟡 WAIT — Awaiting Zone Confirmation")
 
 det = r15["details"]
-with st.expander("📊 Price Lesson Strategy Page Chart Analysis", expanded=True):
+with st.expander("📊 Price Lesson Supply & Demand & Price Action Analysis", expanded=True):
     st.write(f"**Structure Trend:** {det.get('trend')} · **Zone:** {det.get('premium_discount')}")
     st.write(f"**Swing Range:** {price_fmt(det.get('swing_low', bid), asset)} to {price_fmt(det.get('swing_high', bid), asset)} · **Equilibrium (50%):** {price_fmt(det.get('equilibrium', bid), asset)}")
-    st.markdown("**Bullish Signals Found on Chart:**")
+    st.markdown("**Bullish Signals (Demand/PA):**")
     for x in det.get("bull", []): st.write("🟢 " + x)
-    st.markdown("**Bearish Signals Found on Chart:**")
+    st.markdown("**Bearish Signals (Supply/PA):**")
     for x in det.get("bear", []): st.write("🔴 " + x)
 
 if st.session_state.get("execute_now", False):
@@ -471,7 +467,7 @@ with right:
         if r15["rr"] is not None: 
             st.write(f"**Target R:R:** {r15['rr']:.2f}:1")
     else: 
-        st.info("Waiting for clean breakout/momentum direction.")
+        st.info("Waiting for zone test & price action match.")
 
 st.divider()
 st.subheader("📂 Open Trades")
