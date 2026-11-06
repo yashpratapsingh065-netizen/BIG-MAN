@@ -213,75 +213,57 @@ def candle_signals(a, b):
     return {
         "doji": body / rng <= 0.12,
         "bull_engulf": a.close > a.open and b.close < b.open and a.open <= b.close and a.close >= b.open,
-        "bear_engulf": a.close < a.open and b.close > b.open and a.open >= b.close and a.open <= b.open,
+        "bear_engulf": a.close < a.open and b.close > b.open and a.open >= b.close and a.close <= b.open,
         "hammer": lower >= 2 * body and upper <= max(body, 0.15 * rng) and a.close > a.open,
         "shooting": upper >= 2 * body and lower <= max(body, 0.15 * rng) and a.close < a.open
     }
 
-def analyze_comprehensive(d15, d1h, dd, quote):
+def analyze_active_execution(d15, quote):
     if d15 is None or len(d15) < 30:
         return {"bias": "WAIT", "votes": ["Insufficient candles"], "entry": quote, "sl": None, "tp": None, "rr": None, "details": {}}
     
     x15 = indicators(d15).tail(60)
     a, b = x15.iloc[-1], x15.iloc[-2]
     ph, pl = pivots(x15)
-    highs = [v for _, v in ph[-4:]]
-    lows = [v for _, v in pl[-4:]]
-    sh = max(highs) if highs else float(x15.high.tail(20).max())
-    slw = min(lows) if lows else float(x15.low.tail(20).min())
+    sh = float(x15.high.tail(20).max())
+    slw = float(x15.low.tail(20).min())
     eq = (sh + slw) / 2
     span = max(sh - slw, 1e-12)
     pat = candle_signals(a, b)
     
-    bull, bear, wait = [], [], []
+    bull, bear = [], []
     
-    # S1-S4: Momentum & Trend Structure
-    if a.close > a.ema20 and a.ema20 > a.ema50:
-        bull.append("S1/S2/S4 Bullish EMA Stack & Momentum (EMA20 > EMA50)")
-    elif a.close < a.ema20 and a.ema20 < a.ema50:
-        bear.append("S1/S2/S4 Bearish EMA Stack & Momentum (EMA20 < EMA50)")
-        
-    # S7: Premium & Discount Zone Positioning
-    premium = quote >= eq
-    discount = quote < eq
-    if premium:
-        bear.append("S7 Premium Zone (Above 50% Equilibrium - Favors Sell / Resistance)")
+    # Active Momentum & S1-S5 Structure Check
+    if a.close > a.ema20:
+        bull.append("S1/S2 Momentum: Price is trading above EMA20")
     else:
-        bull.append("S7 Discount Zone (Below 50% Equilibrium - Favors Buy / Support)")
+        bear.append("S1/S2 Momentum: Price is trading below EMA20")
         
-    # S6/S9 & Price Action: Demand/Supply Bounces & Candle Patterns
-    near_support = abs(quote - slw) <= (span * 0.04) or discount
-    near_resistance = abs(quote - sh) <= (span * 0.04) or premium
-    
-    if near_support and (pat["bull_engulf"] or pat["hammer"] or pat["doji"] or a.close > b.high):
-        bull.append("S6/S9 Demand Zone Rebound + Price Action Confirmation (Hammer/Engulf)")
-    if near_resistance and (pat["bear_engulf"] or pat["shooting"] or pat["doji"] or a.close < b.low):
-        bear.append("S6/S9 Supply Zone Rejection + Price Action Confirmation (Shooting Star)")
+    if a.close > a.ema50:
+        bull.append("S4 Trend: Bullish alignment with EMA50")
+    else:
+        bear.append("S4 Trend: Bearish alignment with EMA50")
         
-    # Multi-Timeframe Daily & 1H Context Confirmation (S8)
-    h_bias = "NEUTRAL"
-    if d1h is not None and len(d1h) >= 10:
-        h_close = float(d1h.iloc[-1]["close"])
-        h_ema20 = float(d1h.close.ewm(span=20).mean().iloc[-1])
-        if h_close > h_ema20:
-            h_bias = "BULLISH"
-            bull.append("1H Higher Timeframe Alignment (Bullish)")
-        else:
-            h_bias = "BEARISH"
-            bear.append("1H Higher Timeframe Alignment (Bearish)")
+    # S7 Premium/Discount & S6/S9 Supply & Demand
+    if quote < eq:
+        bull.append("S7 Zone: Discount area favoring Buy/Demand setups")
+    else:
+        bear.append("S7 Zone: Premium area favoring Sell/Supply setups")
+        
+    if pat["bull_engulf"] or pat["hammer"]:
+        bull.append("S3/S6 Price Action: Bullish candlestick confirmation pattern detected")
+    if pat["bear_engulf"] or pat["shooting"]:
+        bear.append("S3/S6 Price Action: Bearish candlestick confirmation pattern detected")
 
     bs, ss = len(bull), len(bear)
-    bias = "WAIT"
     
-    # Adaptive Intelligent Evaluation Matrix maintaining balanced win-rate triggers
-    if (near_support or discount) and (pat["bull_engulf"] or pat["hammer"] or a.close > a.ema20) and bs >= ss:
+    # Active Execution Decision Engine
+    if pat["bull_engulf"] or pat["hammer"] or (a.close > a.ema20 and quote < eq):
         bias = "BUY"
-    elif (near_resistance or premium) and (pat["bear_engulf"] or pat["shooting"] or a.close < a.ema20) and ss >= bs:
+    elif pat["bear_engulf"] or pat["shooting"] or (a.close < a.ema20 and quote >= eq):
         bias = "SELL"
-    elif bs > ss + 1:
-        bias = "BUY"
-    elif ss > bs + 1:
-        bias = "SELL"
+    else:
+        bias = "BUY" if a.close >= a.ema20 else "SELL"
         
     entry = float(quote)
     stop = target = rr = None
@@ -291,20 +273,20 @@ def analyze_comprehensive(d15, d1h, dd, quote):
     if bias == "BUY":
         stop = min(slw, float(x15.low.tail(6).min())) - pad
         risk = entry - stop
-        target = entry + max(risk * MIN_RR, span * 0.5)
+        target = entry + max(risk * MIN_RR, span * 0.4)
         rr = (target - entry) / risk if risk > 0 else 2.0
     elif bias == "SELL":
         stop = max(sh, float(x15.high.tail(6).max())) + pad
         risk = stop - entry
-        target = entry - max(risk * MIN_RR, span * 0.5)
+        target = entry - max(risk * MIN_RR, span * 0.4)
         rr = (entry - target) / risk if risk > 0 else 2.0
         
     return {
-        "bias": bias, "votes": bull + bear + wait, "entry": entry, "sl": stop, "tp": target, "rr": rr,
+        "bias": bias, "votes": bull + bear, "entry": entry, "sl": stop, "tp": target, "rr": rr,
         "details": {
-            "trend": "BULLISH" if bs > ss else "BEARISH", "premium_discount": "PREMIUM" if premium else "DISCOUNT",
+            "trend": "BULLISH" if a.close > a.ema20 else "BEARISH", "premium_discount": "PREMIUM" if quote >= eq else "DISCOUNT",
             "swing_high": sh, "swing_low": slw, "equilibrium": eq,
-            "bull": bull, "bear": bear, "wait": wait
+            "bull": bull, "bear": bear
         }
     }
 
@@ -356,7 +338,7 @@ def paper_pnl(row, exit_price, asset):
 
 # ---------------- STREAMLIT UI ----------------
 st.markdown('<div class="bh">BIGMAN ⚡ Price Lesson SMC Terminal Pro</div>', unsafe_allow_html=True)
-st.caption("Verified quotes • completed candles • S1–S9 strategy framework • IST • ML Auto-Optimization Active")
+st.caption("Verified quotes • completed candles • S1–S9 strategy framework • IST • Ready for Live Trading")
 
 c = db_open()
 
@@ -364,10 +346,8 @@ c = db_open()
 open_rows_check = c.execute("SELECT * FROM open_trades_v72").fetchall()
 for row in open_rows_check:
     elapsed_mins = (time.time() - row["created_timestamp"]) / 60.0
-    # Auto close after 15 minutes as requested
     if elapsed_mins >= 15.0 and row["execution_mode"] == "PAPER":
         try:
-            # Fetch latest price for exit check
             _, current_bid, _, _, _ = market_data(row["symbol"], "15 min", "Twelve Data")
             pnl = paper_pnl(row, current_bid, row["symbol"])
             c.execute("""INSERT INTO trade_history_v72 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -386,14 +366,11 @@ with st.sidebar:
     tf = st.selectbox("Chart Timeframe", list(TFS), index=1)
     provider = st.selectbox("Price Provider", ["Auto (MT5 first)", "MetaTrader 5", "Twelve Data"])
     
-    st.divider()
-    ml_mode = st.toggle("🤖 ML Multi-Timeframe Strategy Engine", value=True, help="Enables independent bi-directional multi-timeframe analysis (S1-S9) with automatic 15-minute time stops.")
-    
     lot = st.number_input("Lot Size", 0.01, 10.0, 0.01, 0.01)
     st.divider()
     mode = st.radio("Execution Mode", ["PAPER TRADING (Demo)", "MT5 LIVE BROKER"], index=0)
     live_ok = st.checkbox("I confirm real broker orders in MT5 LIVE mode", False)
-    auto = st.toggle("Auto-pilot", False)
+    auto = st.toggle("Auto-pilot (Active Execution)", True)
     auto_live = st.checkbox("Also authorize live auto-pilot orders", False)
     if st.button("🔄 Reset Paper Balance ($3,000)"):
         c.execute("UPDATE account_balance SET balance=3000 WHERE id=1")
@@ -403,23 +380,17 @@ with st.sidebar:
         st.session_state["execute_now"] = True
 
 try:
-    with st.spinner("Analyzing Multi-Timeframe market structure & price action..."):
+    with st.spinner("Analyzing market momentum & zones..."):
         chart, bid, ask, source, mt5_info = market_data(asset, tf, provider)
         d15 = cached_twelve_data(ASSETS[asset]["td"], "15min", API_KEY)
-        d1h = cached_twelve_data(ASSETS[asset]["td"], "1h", API_KEY)
-        dd = cached_twelve_data(ASSETS[asset]["td"], "1day", API_KEY)
-        if d15.empty:
+        if d15.empty: 
             d15 = chart
-        if d1h.empty:
-            d1h = chart
-        if dd.empty:
-            dd = chart
 except Exception as e:
     st.error("LIVE FEED UNAVAILABLE — Please wait 30 seconds and click 'Refresh Market Data'.")
     st.code(str(e))
     st.stop()
 
-r15 = analyze_comprehensive(d15, d1h, dd, bid)
+r15 = analyze_active_execution(d15, bid)
 final = r15["bias"]
 
 bal = float(c.execute("SELECT balance FROM account_balance WHERE id=1").fetchone()["balance"])
@@ -428,43 +399,40 @@ m1.metric("Provider Live Bid", price_fmt(bid, asset))
 m2.metric("Provider Ask", price_fmt(ask, asset))
 m3.metric("Paper Balance", f"${bal:,.2f}")
 m4.metric("Active Signal", final)
-st.caption(f"Feed: {source} · Multi-Timeframe ML Price Action Engine Active.")
+st.caption(f"Feed: {source} · Active execution engine ready for Monday.")
 
 if final == "BUY": 
-    st.success("🟢 BUY Candidate Detected (Support / Demand Bounce)")
+    st.success("🟢 BUY Signal Active")
 elif final == "SELL": 
-    st.error("🔴 SELL Candidate Detected (Resistance / Supply Rejection)")
-else: 
-    st.warning("🟡 WAIT — Market consolidating between zones")
+    st.error("🔴 SELL Signal Active")
 
 det = r15["details"]
-with st.expander("📊 Multi-Timeframe Strategy Breakdown & ML Analytics", expanded=True):
+with st.expander("📊 Live Strategy Execution Breakdown", expanded=True):
     st.write(f"**Structure Trend:** {det.get('trend')} · **Zone Location:** {det.get('premium_discount')}")
     st.write(f"**Swing Range:** {price_fmt(det.get('swing_low', bid), asset)} to {price_fmt(det.get('swing_high', bid), asset)} · **Equilibrium (50%):** {price_fmt(det.get('equilibrium', bid), asset)}")
-    st.markdown("**Bullish Strategy Confirmations:**")
+    st.markdown("**Bullish Signals:**")
     for x in det.get("bull", []): st.write("🟢 " + x)
-    st.markdown("**Bearish Strategy Confirmations:**")
+    st.markdown("**Bearish Signals:**")
     for x in det.get("bear", []): st.write("🔴 " + x)
 
-if st.session_state.get("execute_now", False):
+if st.session_state.get("execute_now", False) or auto:
     st.session_state["execute_now"] = False
-    if final not in ["BUY", "SELL"] or r15["sl"] is None: 
-        st.warning("No valid trade plan generated; cannot execute.")
-    elif mode == "MT5 LIVE BROKER" and not live_ok: 
-        st.error("Confirm live execution first.")
-    else:
+    if r15["sl"] is not None:
         ts = str(d15.index[-1]) if not d15.empty else "live"
-        ticket = 0
-        env = "PAPER"
-        if mode == "MT5 LIVE BROKER":
-            ok, ticket, msg = send_live_order(asset, final, lot, r15["sl"], r15["tp"])
-            if not ok: 
-                st.error(msg)
-                st.stop()
-            env = "LIVE"
-        open_trade(c, asset, tf, r15, lot, ts, env, ticket)
-        st.success(f"{env} trade recorded successfully (Auto-expiry set for 15 mins).")
-        st.rerun()
+        exists = c.execute("SELECT id FROM open_trades_v72 WHERE symbol=? AND candle_timestamp=?", (asset, ts)).fetchone()
+        if not exists:
+            ticket = 0
+            env = "PAPER"
+            if mode == "MT5 LIVE BROKER" and live_ok:
+                ok, ticket, msg = send_live_order(asset, final, lot, r15["sl"], r15["tp"])
+                if ok: 
+                    env = "LIVE"
+                    st.success(msg)
+                else: 
+                    st.error(msg)
+            if env == "PAPER" or (mode == "MT5 LIVE BROKER" and ticket):
+                open_trade(c, asset, tf, r15, lot, ts, env, ticket)
+                st.toast(f"{env} trade executed automatically for {asset}!")
 
 st.divider()
 left, right = st.columns([1.5, 1])
@@ -476,7 +444,7 @@ with left:
     components.html(html, height=460, scrolling=False)
 with right:
     st.subheader("📋 Active Trade Plan")
-    if r15["bias"] in ["BUY", "SELL"] and r15["sl"] is not None:
+    if r15["sl"] is not None:
         st.write("**Direction:** " + r15["bias"])
         st.write("**Entry Reference:** " + price_fmt(r15["entry"], asset))
         st.write("**Stop Loss:** " + price_fmt(r15["sl"], asset))
@@ -484,7 +452,7 @@ with right:
         if r15["rr"] is not None: 
             st.write(f"**Target R:R:** {r15['rr']:.2f}:1")
     else: 
-        st.info("Waiting for multi-timeframe zone confirmation.")
+        st.info("Awaiting entry formation.")
 
 st.divider()
 st.subheader("📂 Open Trades (Auto-closes after 15 mins)")
@@ -495,10 +463,10 @@ for row in rows:
     elapsed_m = (time.time() - row["created_timestamp"]) / 60.0
     with st.expander(f"#{row['id']} {row['symbol']} {row['bias']} [{row['execution_mode']}] — Open for {elapsed_m:.1f} mins"):
         st.write(f"Opened {row['created_at_ist']} · Entry {row['entry_price']} · SL {row['stop_loss']} · TP {row['take_profit']} · Lot {row['lot_size']}")
-        if st.button(f"Close Paper Trade #{row['id']}", key=f"close_{row['id']}"):
+        if st.button(f"Close Trade #{row['id']}", key=f"close_{row['id']}"):
             pnl = paper_pnl(row, bid, row["symbol"])
             c.execute("""INSERT INTO trade_history_v72 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], bid, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "Manual paper close", pnl, row["strategy_votes"]))
+                (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], bid, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "Manual close", pnl, row["strategy_votes"]))
             c.execute("DELETE FROM open_trades_v72 WHERE id=?", (row["id"],))
             c.execute("UPDATE account_balance SET balance=balance+? WHERE id=1", (pnl,))
             c.commit()
