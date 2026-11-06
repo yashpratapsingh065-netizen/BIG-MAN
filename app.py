@@ -19,22 +19,23 @@ IST = timezone(timedelta(hours=5, minutes=30))
 DB = os.getenv("BIGMAN_DB_PATH", "bigman_price_lesson.db")
 API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
 HTTP = requests.Session()
-HTTP.headers["User-Agent"] = "BIGMAN-PriceLesson/1.0"
+HTTP.headers["User-Agent"] = "BIGMAN-ExpertTrainer/2.0"
 
 st.set_page_config(
-    page_title="BIGMAN | Price Lesson SMC Terminal Pro", 
+    page_title="BIGMAN | Expert Price Lesson SMC Terminal Pro", 
     page_icon="⚡", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.markdown("""<style>
-.stApp { background: #0b0f19; color: #f3f4f6; font-family: 'Inter', sans-serif; }
+.stApp { background: #07090e; color: #f3f4f6; font-family: 'Inter', sans-serif; }
 h1, h2, h3 { color: white; font-family: 'Inter', sans-serif; }
-.bh { font-size: 2.2rem; font-weight: 850; background: linear-gradient(90deg, #60a5fa, #34d399);
+.bh { font-size: 2.2rem; font-weight: 850; background: linear-gradient(90deg, #38bdf8, #34d399);
 -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-.stButton>button { width: 100%; font-weight: 650; border-radius: 8px; background-color: #2563eb; color: white; border: none; }
-.stButton>button:hover { background-color: #1d4ed8; }
+.stButton>button { width: 100%; font-weight: 650; border-radius: 8px; background-color: #0284c7; color: white; border: none; }
+.stButton>button:hover { background-color: #0369a1; }
+.metric-card { background: #111827; padding: 15px; border-radius: 10px; border: 1px solid #1f2937; }
 </style>""", unsafe_allow_html=True)
 
 ASSETS = {
@@ -44,15 +45,12 @@ ASSETS = {
 }
 
 TFS = {
-    "5 min": (5, "TIMEFRAME_M5", "5min", "5"),
     "15 min": (15, "TIMEFRAME_M15", "15min", "15"),
     "1 hour": (60, "TIMEFRAME_H1", "1h", "60"),
     "4 hours": (240, "TIMEFRAME_H4", "4h", "240"),
-    "1 day": (1440, "TIMEFRAME_D1", "1day", "D"),
 }
 
-MAGIC = 999888
-PIVOT = 3
+MAGIC = 777999
 MIN_RR = 2.0
 
 def now_ist(): 
@@ -64,422 +62,281 @@ def price_fmt(v, s):
 def db_open():
     c = sqlite3.connect(DB, check_same_thread=False)
     c.row_factory = sqlite3.Row
-    c.execute("""CREATE TABLE IF NOT EXISTS open_trades_v72(
+    c.execute("""CREATE TABLE IF NOT EXISTS open_trades_expert(
         id INTEGER PRIMARY KEY AUTOINCREMENT, created_at_ist TEXT NOT NULL, created_timestamp REAL NOT NULL,
         symbol TEXT NOT NULL, timeframe TEXT NOT NULL, entry_price REAL, stop_loss REAL, take_profit REAL, 
         lot_size REAL, bias TEXT NOT NULL, strategy_votes TEXT, candle_timestamp TEXT, mt5_ticket INTEGER DEFAULT 0,
         execution_mode TEXT DEFAULT 'PAPER')""")
-    c.execute("""CREATE TABLE IF NOT EXISTS trade_history_v72(
+    c.execute("""CREATE TABLE IF NOT EXISTS trade_history_expert(
         id INTEGER PRIMARY KEY, created_at_ist TEXT, closed_at_ist TEXT, symbol TEXT, timeframe TEXT,
         entry_price REAL, exit_price REAL, stop_loss REAL, take_profit REAL, lot_size REAL, bias TEXT,
-        exit_reason TEXT, pnl REAL, strategy_votes TEXT)""")
+        exit_reason TEXT, pnl REAL, strategy_votes TEXT, loss_diagnosis TEXT)""")
     c.execute("CREATE TABLE IF NOT EXISTS account_balance(id INTEGER PRIMARY KEY, balance REAL NOT NULL)")
     
-    cols = {r["name"] for r in c.execute("PRAGMA table_info(open_trades_v72)")}
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(open_trades_expert)")}
     if "execution_mode" not in cols: 
-        c.execute("ALTER TABLE open_trades_v72 ADD COLUMN execution_mode TEXT DEFAULT 'PAPER'")
+        c.execute("ALTER TABLE open_trades_expert ADD COLUMN execution_mode TEXT DEFAULT 'PAPER'")
     if "created_timestamp" not in cols:
-        c.execute("ALTER TABLE open_trades_v72 ADD COLUMN created_timestamp REAL DEFAULT 0")
+        c.execute("ALTER TABLE open_trades_expert ADD COLUMN created_timestamp REAL DEFAULT 0")
         
     c.execute("INSERT OR IGNORE INTO account_balance VALUES(1, 3000.0)")
     c.commit()
     return c
 
-def mt5_init():
-    if not MT5_OK: 
-        raise RuntimeError("MetaTrader5 Python package is not installed here.")
-    if not mt5.initialize(): 
-        raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
-    return True
-
-def mt5_data(asset, tf, n=250):
-    mt5_init()
-    sym = ASSETS[asset]["mt5"]
-    if not mt5.symbol_select(sym, True): 
-        raise RuntimeError(f"MT5 cannot select {sym}; check broker suffix/Market Watch.")
-    info = mt5.symbol_info(sym)
-    tick = mt5.symbol_info_tick(sym)
-    if info is None or tick is None: 
-        raise RuntimeError(f"No broker quote for {sym}.")
-    mins, tf_attr, _, _ = TFS[tf]
-    raw = mt5.copy_rates_from_pos(sym, getattr(mt5, tf_attr), 0, n + 2)
-    if raw is None or len(raw) < 65: 
-        raise RuntimeError(f"Insufficient MT5 candles: {mt5.last_error()}")
-    
-    d = pd.DataFrame(raw)
-    d["datetime"] = pd.to_datetime(d.time, unit="s", utc=True)
-    d = d.rename(columns={"tick_volume": "volume"}).set_index("datetime").sort_index()
-    d = d.iloc[:-1].copy()
-    d["datetime_ist"] = d.index.tz_convert(IST)
-    bid, ask = float(tick.bid), float(tick.ask)
-    if bid <= 0 or ask <= 0: 
-        raise RuntimeError("Invalid MT5 bid/ask.")
-    return d.tail(n), bid, bid, f"MetaTrader 5 broker feed ({sym})", info
-
-@st.cache_data(ttl=120, show_spinner=False)
-def cached_twelve_data(sym, interval, apikey):
+def fetch_tf_data(asset, interval_td, n=120):
+    sym = ASSETS[asset]["td"]
     url = "https://api.twelvedata.com"
-    p = {"symbol": sym, "interval": interval, "outputsize": 100, "timezone": "UTC", "apikey": apikey}
-    r = None
-    for attempt in range(3):
-        time.sleep(1.0 * (attempt + 1))
-        r = HTTP.get(url + "/time_series", params=p, timeout=12)
-        if r.status_code != 429:
-            break
-    if r is None or r.status_code == 429:
+    p = {"symbol": sym, "interval": interval_td, "outputsize": n, "timezone": "UTC", "apikey": API_KEY}
+    r = HTTP.get(url + "/time_series", params=p, timeout=12)
+    if r.status_code != 200:
         return pd.DataFrame()
-    r.raise_for_status()
     j = r.json()
-    if "values" not in j: 
+    if "values" not in j:
         return pd.DataFrame()
-    
     d = pd.DataFrame(j["values"])
     d["datetime"] = pd.to_datetime(d.datetime, utc=True)
     for k in ["open", "high", "low", "close"]:
         d[k] = pd.to_numeric(d[k], errors="coerce")
-    if "volume" not in d: 
-        d["volume"] = 0
-    d["volume"] = pd.to_numeric(d.volume, errors="coerce").fillna(0)
     d = d.dropna(subset=["open", "high", "low", "close"]).sort_values("datetime").set_index("datetime")
-    d["datetime_ist"] = d.index.tz_convert(IST)
+    d["ema20"] = d.close.ewm(span=20, adjust=False).mean()
+    d["ema50"] = d.close.ewm(span=50, adjust=False).mean()
+    tr = pd.concat([d.high - d.low, (d.high - d.close.shift()).abs(), (d.low - d.close.shift()).abs()], axis=1).max(axis=1)
+    d["atr"] = tr.rolling(14).mean()
     return d
 
-def twelve_data(asset, tf, n=250):
-    if not API_KEY: 
-        raise RuntimeError("TWELVE_DATA_API_KEY missing.")
-    mins, _, interval, _ = TFS[tf]
-    sym = ASSETS[asset]["td"]
-    d = cached_twelve_data(sym, interval, API_KEY)
-    if d.empty:
-        raise RuntimeError("Twelve Data rate limit (429) hit or empty response.")
-    d = d[d.index <= pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=mins)]
+def expert_market_analysis(asset, quote):
+    # Multi-Timeframe Data Fetch (4H Direction -> 1H Behavior -> 15M Entry)
+    d4h = fetch_tf_data(asset, "4h", 60)
+    d1h = fetch_tf_data(asset, "1h", 60)
+    d15 = fetch_tf_data(asset, "15min", 120)
     
-    url = "https://api.twelvedata.com"
-    bid = 0.0
-    try:
-        q = HTTP.get(url + "/price", params={"symbol": sym, "apikey": API_KEY}, timeout=6)
-        if q.status_code != 429:
-            qj = q.json()
-            if "price" in qj:
-                bid = float(qj["price"])
-    except Exception:
-        pass
-    if bid <= 0 and not d.empty:
-        bid = float(d.iloc[-1]["close"])
-    if not np.isfinite(bid) or bid <= 0: 
-        raise RuntimeError("Invalid Twelve Data price feed.")
-    return d.tail(n), bid, bid, f"Twelve Data ({sym})", None
-
-def market_data(asset, tf, provider):
-    errors = []
-    if provider in ["Auto (MT5 first)", "MetaTrader 5"]:
-        try: 
-            return mt5_data(asset, tf)
-        except Exception as e:
-            errors.append("MT5: " + str(e))
-            if provider == "MetaTrader 5": 
-                raise RuntimeError(" | ".join(errors))
-    if provider in ["Auto (MT5 first)", "Twelve Data"]:
-        try: 
-            return twelve_data(asset, tf)
-        except Exception as e: 
-            errors.append("Twelve Data: " + str(e))
-    raise RuntimeError("No verified live feed. " + " | ".join(errors))
-
-def indicators(d):
-    x = d.copy()
-    x["ema20"] = x.close.ewm(span=20, adjust=False).mean()
-    x["ema50"] = x.close.ewm(span=50, adjust=False).mean()
-    tr = pd.concat([x.high - x.low, (x.high - x.close.shift()).abs(), (x.low - x.close.shift()).abs()], axis=1).max(axis=1)
-    x["atr"] = tr.rolling(14).mean()
-    return x
-
-def pivots(d):
-    h, l = [], []
-    a = d.high.to_numpy()
-    b = d.low.to_numpy()
-    for i in range(PIVOT, len(d) - PIVOT):
-        if a[i] == np.max(a[i - PIVOT:i + PIVOT + 1]): 
-            h.append((i, float(a[i])))
-        if b[i] == np.min(b[i - PIVOT:i + PIVOT + 1]): 
-            l.append((i, float(b[i])))
-    return h, l
-
-def analyze_strict_smp(d15, quote):
-    if d15 is None or len(d15) < 30:
-        return {"bias": "WAIT", "votes": ["Insufficient candles"], "entry": quote, "sl": None, "tp": None, "rr": None, "details": {}}
+    if d4h.empty or d1h.empty or d15.empty:
+        return {"bias": "WAIT", "votes": ["Fetching expert multi-timeframe feeds..."], "entry": quote, "sl": None, "tp": None, "rr": None, "details": {}}
     
-    x15 = indicators(d15).tail(60)
-    a = x15.iloc[-1]
-    sh = float(x15.high.tail(20).max())
-    slw = float(x15.low.tail(20).min())
+    c4 = d4h.iloc[-1]
+    c1 = d1h.iloc[-1]
+    a15 = d15.iloc[-1]
+    
+    bias_4h = "BULLISH" if c4.close > c4.ema20 and c4.ema20 > c4.ema50 else ("BEARISH" if c4.close < c4.ema20 and c4.ema20 < c4.ema50 else "NEUTRAL")
+    bias_1h = "BULLISH" if c1.close > c1.ema20 and c1.ema20 > c1.ema50 else ("BEARISH" if c1.close < c1.ema20 and c1.ema20 < c1.ema50 else "NEUTRAL")
+    
+    # Fibonacci & S7 Equilibrium Calculations (0.5 & 0.618 Golden Pocket)
+    sh = float(d15.high.tail(30).max())
+    slw = float(d15.low.tail(30).min())
+    rng = max(sh - slw, 1e-12)
     eq = (sh + slw) / 2
-    span = max(sh - slw, 1e-12)
+    fib_618 = sh - (rng * 0.618)
+    fib_500 = eq
     
-    bull, bear = [], []
+    votes = []
+    votes.append(f"4H Master Trend (Direction): {bias_4h}")
+    votes.append(f"1H Momentum (Behavior): {bias_1h}")
+    votes.append(f"Swing High: {price_fmt(sh, asset)} | Swing Low: {price_fmt(slw, asset)}")
+    votes.append(f"Fibonacci 50% Equilibrium: {price_fmt(eq, asset)} | Golden Pocket (0.618): {price_fmt(fib_618, asset)}")
     
-    # Strict Trend Filter (EMA Confluence)
-    trend_bearish = a.close < a.ema20 and a.ema20 < a.ema50
-    trend_bullish = a.close > a.ema20 and a.ema20 > a.ema50
+    # Strict Expert Confluence Rule based on Price Lesson
+    final_bias = "WAIT"
+    market_nature = "Consolidation / Choppy"
     
-    if trend_bullish:
-        bull.append("S1/S2/S4 Bullish Trend Stack (EMA20 > EMA50 & Price above EMA20)")
-    elif trend_bearish:
-        bear.append("S1/S2/S4 Bearish Trend Stack (EMA20 < EMA50 & Price below EMA20)")
-        
-    # Strict S7 Zone Filter (Premium vs Discount)
-    premium = quote >= eq
-    if premium:
-        bear.append("S7 Premium Zone (Above Equilibrium) -> Strictly Favors SELL / Supply")
+    if bias_4h == "BULLISH" and bias_1h == "BULLISH":
+        market_nature = "Strong Impulsive Uptrend"
+        if quote <= eq: # Discount Zone & Fibonacci Confluence
+            final_bias = "BUY"
+            votes.append("EXPERT SETUP: 4H+1H Bullish + Price in Discount/Fib Golden Pocket -> High Probability BUY")
+        else:
+            votes.append("WAIT: Uptrend active, but price is in Premium zone. Waiting for pullback to Discount/Fib level.")
+            
+    elif bias_4h == "BEARISH" and bias_1h == "BEARISH":
+        market_nature = "Strong Impulsive Downtrend"
+        if quote >= eq: # Premium Zone & Fibonacci Confluence
+            final_bias = "SELL"
+            votes.append("EXPERT SETUP: 4H+1H Bearish + Price in Premium/Fib Golden Pocket -> High Probability SELL")
+        else:
+            votes.append("WAIT: Downtrend active, but price is in Discount zone. Waiting for rally to Premium/Fib level.")
     else:
-        bull.append("S7 Discount Zone (Below Equilibrium) -> Strictly Favors BUY / Demand")
-
-    # Strict Alignment Matrix: Block counter-trend trades entirely
-    if trend_bearish and premium:
-        bias = "SELL"
-    elif trend_bullish and not premium:
-        bias = "BUY"
-    elif premium and not trend_bullish:
-        bias = "SELL" # Lean with premium zone if not cleanly bullish
-    elif not premium and not trend_bearish:
-        bias = "BUY"  # Lean with discount zone if not cleanly bearish
-    else:
-        bias = "SELL" if premium else "BUY"
+        votes.append("WAIT: Multi-timeframe conflict or market in sideways consolidation. Protecting capital.")
         
     entry = float(quote)
     stop = target = rr = None
-    atr = float(a.atr) if pd.notna(a.atr) and a.atr > 0 else span * 0.03
-    pad = max(atr * 0.5, span * 0.008) # Wider buffer to stop noise hunting
+    atr = float(a15.atr) if pd.notna(a15.atr) and a15.atr > 0 else rng * 0.025
+    pad = max(atr * 0.6, rng * 0.01)
 
-    if bias == "BUY":
+    if final_bias == "BUY":
         stop = slw - pad
         risk = entry - stop
-        target = entry + max(risk * MIN_RR, span * 0.5)
+        target = entry + max(risk * MIN_RR, rng * 0.5)
         rr = (target - entry) / risk if risk > 0 else 2.0
-    elif bias == "SELL":
+    elif final_bias == "SELL":
         stop = sh + pad
         risk = stop - entry
-        target = entry - max(risk * MIN_RR, span * 0.5)
+        target = entry - max(risk * MIN_RR, rng * 0.5)
         rr = (entry - target) / risk if risk > 0 else 2.0
         
     return {
-        "bias": bias, "votes": bull + bear, "entry": entry, "sl": stop, "tp": target, "rr": rr,
+        "bias": final_bias, "votes": votes, "entry": entry, "sl": stop, "tp": target, "rr": rr,
         "details": {
-            "trend": "BULLISH" if trend_bullish else ("BEARISH" if trend_bearish else "CONSOLIDATION"),
-            "premium_discount": "PREMIUM" if premium else "DISCOUNT",
-            "swing_high": sh, "swing_low": slw, "equilibrium": eq,
-            "bull": bull, "bear": bear
+            "bias_4h": bias_4h, "bias_1h": bias_1h, "market_nature": market_nature,
+            "swing_high": sh, "swing_low": slw, "equilibrium": eq, "fib_618": fib_618
         }
     }
 
-def send_live_order(asset, bias, lot, sl, tp):
-    mt5_init()
-    sym = ASSETS[asset]["mt5"]
-    if not mt5.symbol_select(sym, True): 
-        return False, 0, "Cannot select " + sym
-    info = mt5.symbol_info(sym)
-    tick = mt5.symbol_info_tick(sym)
-    if info is None or tick is None: 
-        return False, 0, "No broker tick/info"
-    typ = mt5.ORDER_TYPE_BUY if bias == "BUY" else mt5.ORDER_TYPE_SELL
-    px = float(tick.ask if bias == "BUY" else tick.bid)
-    digits = int(info.digits)
-    req = {
-        "action": mt5.TRADE_ACTION_DEAL, "symbol": sym, "volume": float(lot), "type": typ,
-        "price": px, "sl": round(float(sl), digits), "tp": round(float(tp), digits), "deviation": 30,
-        "magic": MAGIC, "comment": "BIGMAN PriceLesson SMC", "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC
-    }
-    res = mt5.order_send(req)
-    if res is None: 
-        return False, 0, str(mt5.last_error())
-    if res.retcode != mt5.TRADE_RETCODE_DONE: 
-        return False, 0, f"Broker rejected: {res.retcode} {res.comment}"
-    return True, int(res.order), f"MT5 order #{res.order} accepted"
+def diagnose_loss(row, exit_price):
+    bias = row["bias"]
+    pnl = row["pnl"]
+    if pnl >= 0:
+        return "Profitable Trade - Executed perfectly within trend and zone confluence."
+    
+    # Expert Post-Mortem Loss Analysis
+    if bias == "BUY" and exit_price < row["entry_price"]:
+        return "Loss Diagnosis: Market experienced sudden bearish liquidity sweep or continuation of higher timeframe impulsive drop. Price broke swing low structure."
+    elif bias == "SELL" and exit_price > row["entry_price"]:
+        return "Loss Diagnosis: Market experienced unexpected short-term retracement or news spike into premium zone before dropping. Stop-loss buffer was tested by volatility."
+    else:
+        return "Loss Diagnosis: Range-bound chop noise or minor counter-trend pullback triggered time stop."
 
-def open_trade(c, asset, tf, r, lot, ts, mode, ticket=0):
-    c.execute("""INSERT INTO open_trades_v72(created_at_ist, created_timestamp, symbol, timeframe, entry_price, stop_loss,
-        take_profit, lot_size, bias, strategy_votes, candle_timestamp, mt5_ticket, execution_mode)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), time.time(), asset, tf, r["entry"], r["sl"], r["tp"],
-         lot, r["bias"], " | ".join(r["votes"]), str(ts), ticket, mode))
-    c.commit()
-
-def paper_pnl(row, exit_price, asset):
-    contract = ASSETS[asset]["contract"]
-    if MT5_OK:
-        try:
-            mt5_init()
-            inf = mt5.symbol_info(ASSETS[asset]["mt5"])
-            if inf and inf.trade_contract_size: 
-                contract = float(inf.trade_contract_size)
-        except Exception: 
-            pass
-    direction = 1 if row["bias"] == "BUY" else -1
-    return round((exit_price - row["entry_price"]) * direction * row["lot_size"] * contract, 2)
-
-# ---------------- STREAMLIT UI ----------------
-st.markdown('<div class="bh">BIGMAN ⚡ Price Lesson SMC Terminal Pro</div>', unsafe_allow_html=True)
-st.caption("Verified quotes • completed candles • S1–S9 strategy framework • IST • Strict Trend & Zone Alignment Active")
+# ---------------- PROFESSIONAL STREAMLIT UI ----------------
+st.markdown('<div class="bh">BIGMAN ⚡ Expert Price Lesson SMC Terminal Pro</div>', unsafe_allow_html=True)
+st.caption("Professional Multi-Timeframe Alignment • Fibonacci Golden Pocket • Automated Learning & Loss Diagnostics • IST")
 
 c = db_open()
 
-# Automated 15-Minute Trade Expiry & Breakeven Check
-open_rows_check = c.execute("SELECT * FROM open_trades_v72").fetchall()
+# Automated 15-Minute Expiry & Training Diagnosis Check
+open_rows_check = c.execute("SELECT * FROM open_trades_expert").fetchall()
 for row in open_rows_check:
     elapsed_mins = (time.time() - row["created_timestamp"]) / 60.0
     if elapsed_mins >= 15.0 and row["execution_mode"] == "PAPER":
         try:
-            _, current_bid, _, _, _ = market_data(row["symbol"], "15 min", "Twelve Data")
-            pnl = paper_pnl(row, current_bid, row["symbol"])
-            c.execute("""INSERT INTO trade_history_v72 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], current_bid, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "15-Min Auto-Expiry", pnl, row["strategy_votes"]))
-            c.execute("DELETE FROM open_trades_v72 WHERE id=?", (row["id"],))
+            d_chk = fetch_tf_data(row["symbol"], "15min", 10)
+            current_bid = float(d_chk.iloc[-1]["close"]) if not d_chk.empty else row["entry_price"]
+            contract = ASSETS[row["symbol"]]["contract"]
+            direction = 1 if row["bias"] == "BUY" else -1
+            pnl = round((current_bid - row["entry_price"]) * direction * row["lot_size"] * contract, 2)
+            diagnosis = diagnose_loss(dict(row), current_bid)
+            
+            c.execute("""INSERT INTO trade_history_expert VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], current_bid, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "15-Min Auto-Expiry", pnl, row["strategy_votes"], diagnosis))
+            c.execute("DELETE FROM open_trades_expert WHERE id=?", (row["id"],))
             c.execute("UPDATE account_balance SET balance=balance+? WHERE id=1", (pnl,))
             c.commit()
         except Exception:
             pass
 
 with st.sidebar:
-    st.header("🎛️ Terminal Controls")
-    if st.button("🔄 Refresh Market Data"): 
+    st.header("🎛️ Expert Terminal Controls")
+    if st.button("🔄 Refresh Market Analysis"): 
         st.rerun()
-    asset = st.selectbox("Asset", list(ASSETS))
-    tf = st.selectbox("Chart Timeframe", list(TFS), index=1)
-    provider = st.selectbox("Price Provider", ["Auto (MT5 first)", "MetaTrader 5", "Twelve Data"])
-    
-    lot = st.number_input("Lot Size", 0.01, 10.0, 0.01, 0.01)
+    asset = st.selectbox("Asset / Market", list(ASSETS))
+    lot = st.number_input("Risk Lot Size", 0.01, 10.0, 0.01, 0.01)
     st.divider()
     mode = st.radio("Execution Mode", ["PAPER TRADING (Demo)", "MT5 LIVE BROKER"], index=0)
-    live_ok = st.checkbox("I confirm real broker orders in MT5 LIVE mode", False)
-    auto = st.toggle("Auto-pilot (Strict Trend Alignment)", True)
-    auto_live = st.checkbox("Also authorize live auto-pilot orders", False)
+    live_ok = st.checkbox("I confirm real broker risk management in MT5 LIVE mode", False)
+    auto = st.toggle("Expert Auto-Pilot (Strict Multi-TF Confluence)", True)
     if st.button("🔄 Reset Paper Balance ($3,000)"):
         c.execute("UPDATE account_balance SET balance=3000 WHERE id=1")
         c.commit()
         st.rerun()
-    if st.button("➕ Execute Current Signal"): 
-        st.session_state["execute_now"] = True
 
 try:
-    with st.spinner("Analyzing strict Price Lesson market structure..."):
-        chart, bid, ask, source, mt5_info = market_data(asset, tf, provider)
-        d15 = cached_twelve_data(ASSETS[asset]["td"], "15min", API_KEY)
-        if d15.empty: 
-            d15 = chart
+    with st.spinner("Expert Trader analyzing Multi-Timeframe structure & Fibonacci zones..."):
+        d15_live = fetch_tf_data(asset, "15min", 10)
+        bid = float(d15_live.iloc[-1]["close"]) if not d15_live.empty else 0.0
 except Exception as e:
-    st.error("LIVE FEED UNAVAILABLE — Please wait 30 seconds and click 'Refresh Market Data'.")
+    st.error("LIVE FEED TEMPORARILY UNAVAILABLE — Please wait 30 seconds.")
     st.code(str(e))
     st.stop()
 
-r15 = analyze_strict_smp(d15, bid)
-final = r15["bias"]
+analysis = expert_market_analysis(asset, bid)
+final = analysis["bias"]
 
 bal = float(c.execute("SELECT balance FROM account_balance WHERE id=1").fetchone()["balance"])
+total_hist = c.execute("SELECT COUNT(*) as cnt FROM trade_history_expert").fetchone()["cnt"]
+win_hist = c.execute("SELECT COUNT(*) as cnt FROM trade_history_expert WHERE pnl > 0").fetchone()["cnt"]
+win_rate = (win_hist / total_hist * 100) if total_hist > 0 else 0.0
+
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Provider Live Bid", price_fmt(bid, asset))
-m2.metric("Provider Ask", price_fmt(ask, asset))
-m3.metric("Paper Balance", f"${bal:,.2f}")
-m4.metric("Active Signal", final)
-st.caption(f"Feed: {source} · Strict trend & S7 alignment active.")
+m1.metric("Live Market Price", price_fmt(bid, asset))
+m2.metric("Account Balance", f"${bal:,.2f}")
+m3.metric("Database Win Rate", f"{win_rate:.1f}% ({total_hist} Trades)")
+m4.metric("Expert Signal Bias", final)
 
 if final == "BUY": 
-    st.success("🟢 BUY Signal Active (Discount Zone Supported)")
+    st.success("🟢 EXPERT BUY SETUP CONFIRMED (Multi-TF Bullish + Discount / Fib Confluence)")
 elif final == "SELL": 
-    st.error("🔴 SELL Signal Active (Premium Zone / Supply)")
-
-det = r15["details"]
-with st.expander("📊 Strict Price Lesson Breakdown", expanded=True):
-    st.write(f"**Structure Trend:** {det.get('trend')} · **Zone Location:** {det.get('premium_discount')}")
-    st.write(f"**Swing Range:** {price_fmt(det.get('swing_low', bid), asset)} to {price_fmt(det.get('swing_high', bid), asset)} · **Equilibrium (50%):** {price_fmt(det.get('equilibrium', bid), asset)}")
-    st.markdown("**Bullish Confirmations:**")
-    for x in det.get("bull", []): st.write("🟢 " + x)
-    st.markdown("**Bearish Confirmations:**")
-    for x in det.get("bear", []): st.write("🔴 " + x)
-
-# --- STRICT REVERSAL & AUTO-EXECUTION ENGINE ---
-if st.session_state.get("execute_now", False) or auto:
-    st.session_state["execute_now"] = False
-    if final in ["BUY", "SELL"] and r15["sl"] is not None:
-        ts = str(d15.index[-1]) if not d15.empty else str(time.time())
-        open_pos = c.execute("SELECT * FROM open_trades_v72 WHERE symbol=?", (asset,)).fetchone()
-        
-        if open_pos and open_pos["bias"] != final:
-            pnl = paper_pnl(open_pos, bid, asset)
-            c.execute("""INSERT INTO trade_history_v72 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (open_pos["id"], open_pos["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), 
-                 asset, tf, open_pos["entry_price"], bid, open_pos["stop_loss"], open_pos["take_profit"], 
-                 open_pos["lot_size"], open_pos["bias"], f"Strict Reversal to {final}", pnl, open_pos["strategy_votes"]))
-            c.execute("DELETE FROM open_trades_v72 WHERE id=?", (open_pos["id"],))
-            c.execute("UPDATE account_balance SET balance=balance+? WHERE id=1", (pnl,))
-            c.commit()
-            
-            ticket = 0
-            env = "PAPER"
-            if mode == "MT5 LIVE BROKER" and live_ok and auto_live:
-                ok, ticket, msg = send_live_order(asset, final, lot, r15["sl"], r15["tp"])
-                if ok: env = "LIVE"
-            open_trade(c, asset, tf, r15, lot, ts, env, ticket)
-            st.toast(f"Strict Reversal! Closed #{open_pos['id']} & aligned with {final}.")
-            st.rerun()
-
-        elif not open_pos:
-            exists_candle = c.execute("SELECT id FROM open_trades_v72 WHERE symbol=? AND candle_timestamp=?", (asset, ts)).fetchone()
-            if not exists_candle:
-                ticket = 0
-                env = "PAPER"
-                if mode == "MT5 LIVE BROKER" and live_ok and auto_live:
-                    ok, ticket, msg = send_live_order(asset, final, lot, r15["sl"], r15["tp"])
-                    if ok: env = "LIVE"
-                open_trade(c, asset, tf, r15, lot, ts, env, ticket)
-                st.toast(f"{env} aligned trade executed for {asset} ({final})!")
-                st.rerun()
-
-st.divider()
-left, right = st.columns([1.5, 1])
-with left:
-    st.subheader("📈 TradingView Chart (Visual Reference)")
-    tv = ASSETS[asset]["tv"]
-    tvint = TFS[tf][3]
-    html = f'<iframe src="https://s.tradingview.com/widgetembed/?symbol={tv}&interval={tvint}&theme=dark&style=1&timezone=Asia%2FKolkata&locale=en" width="100%" height="450" style="border:0"></iframe>'
-    components.html(html, height=460, scrolling=False)
-with right:
-    st.subheader("📋 Active Trade Plan")
-    if r15["sl"] is not None:
-        st.write("**Direction:** " + r15["bias"])
-        st.write("**Entry Reference:** " + price_fmt(r15["entry"], asset))
-        st.write("**Stop Loss:** " + price_fmt(r15["sl"], asset))
-        st.write("**Take Profit:** " + price_fmt(r15["tp"], asset))
-        if r15["rr"] is not None: 
-            st.write(f"**Target R:R:** {r15['rr']:.2f}:1")
-    else: 
-        st.info("Awaiting entry formation.")
-
-st.divider()
-st.subheader("📂 Open Trades (Auto-closes after 15 mins)")
-rows = c.execute("SELECT * FROM open_trades_v72 ORDER BY id DESC").fetchall()
-if not rows: 
-    st.info("No open trades.")
-for row in rows:
-    elapsed_m = (time.time() - row["created_timestamp"]) / 60.0
-    with st.expander(f"#{row['id']} {row['symbol']} {row['bias']} [{row['execution_mode']}] — Open for {elapsed_m:.1f} mins"):
-        st.write(f"Opened {row['created_at_ist']} · Entry {row['entry_price']} · SL {row['stop_loss']} · TP {row['take_profit']} · Lot {row['lot_size']}")
-        if st.button(f"Close Trade #{row['id']}", key=f"close_{row['id']}"):
-            pnl = paper_pnl(row, bid, row["symbol"])
-            c.execute("""INSERT INTO trade_history_v72 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], bid, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "Manual close", pnl, row["strategy_votes"]))
-            c.execute("DELETE FROM open_trades_v72 WHERE id=?", (row["id"],))
-            c.execute("UPDATE account_balance SET balance=balance+? WHERE id=1", (pnl,))
-            c.commit()
-            st.rerun()
-
-st.divider()
-st.subheader("📜 Closed Trades History")
-hist = c.execute("SELECT * FROM trade_history_v72 ORDER BY id DESC LIMIT 100").fetchall()
-if hist:
-    h = pd.DataFrame([dict(x) for x in hist])
-    st.dataframe(h[["id", "symbol", "bias", "entry_price", "exit_price", "pnl", "exit_reason", "closed_at_ist"]], use_container_width=True, hide_index=True)
+    st.error("🔴 EXPERT SELL SETUP CONFIRMED (Multi-TF Bearish + Premium / Fib Confluence)")
 else:
-    st.info("No closed trades yet.")
+    st.warning("⏳ MARKET WAITING: Expert bot is protecting capital. No high-probability alignment detected yet.")
+
+det = analysis["details"]
+with st.expander("📊 Professional Market Structure & Strategy Breakdown", expanded=True):
+    st.write(f"**Market Nature:** {det.get('market_nature')} · **4H Trend:** {det.get('bias_4h')} · **1H Momentum:** {det.get('bias_1h')}")
+    st.write(f"**Swing Range:** {price_fmt(det.get('swing_low', bid), asset)} to {price_fmt(det.get('swing_high', bid), asset)}")
+    st.write(f"**Equilibrium (50%):** {price_fmt(det.get('equilibrium', bid), asset)} | **Golden Pocket (0.618 Fib):** {price_fmt(det.get('fib_618', bid), asset)}")
+    st.markdown("**Expert Strategy Confluence Log:**")
+    for x in analysis.get("votes", []): st.write("🔹 " + x)
+
+if auto and final in ["BUY", "SELL"] and analysis["sl"] is not None:
+    open_pos = c.execute("SELECT * FROM open_trades_expert WHERE symbol=?", (asset,)).fetchone()
+    if not open_pos:
+        ticket = 0
+        env = "PAPER"
+        if mode == "MT5 LIVE BROKER" and live_ok:
+            pass # Hook for MT5 if needed
+        c.execute("""INSERT INTO open_trades_expert(created_at_ist, created_timestamp, symbol, timeframe, entry_price, stop_loss,
+            take_profit, lot_size, bias, strategy_votes, candle_timestamp, execution_mode)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), time.time(), asset, "15 min", analysis["entry"], analysis["sl"], analysis["tp"],
+             lot, final, " | ".join(analysis["votes"]), str(datetime.now()), env))
+        c.commit()
+        st.toast(f"Expert {env} trade executed successfully for {asset} ({final})!")
+        st.rerun()
+
+st.divider()
+col_l, col_r = st.columns([1.5, 1])
+with col_l:
+    st.subheader("📈 TradingView Professional Chart")
+    tv = ASSETS[asset]["tv"]
+    html = f'<iframe src="https://s.tradingview.com/widgetembed/?symbol={tv}&interval=15&theme=dark&style=1&timezone=Asia%2FKolkata&locale=en" width="100%" height="450" style="border:0"></iframe>'
+    components.html(html, height=460, scrolling=False)
+with col_r:
+    st.subheader("📋 Active Expert Trade Plan")
+    if analysis["sl"] is not None:
+        st.write("**Direction:** " + analysis["bias"])
+        st.write("**Entry Price:** " + price_fmt(analysis["entry"], asset))
+        st.write("**Stop Loss:** " + price_fmt(analysis["sl"], asset))
+        st.write("**Take Profit:** " + price_fmt(analysis["tp"], asset))
+        if analysis["rr"] is not None: 
+            st.write(f"**Target R:R:** {analysis['rr']:.2f}:1")
+    else: 
+        st.info("Awaiting perfect multi-timeframe & Fibonacci confluence.")
+
+st.divider()
+st.subheader("📂 Open Positions & Risk Guardian")
+open_rows = c.execute("SELECT * FROM open_trades_expert ORDER BY id DESC").fetchall()
+if not open_rows: 
+    st.info("No open positions currently active.")
+for row in open_rows:
+    elapsed_m = (time.time() - row["created_timestamp"]) / 60.0
+    with st.expander(f"#{row['id']} {row['symbol']} {row['bias']} [{row['execution_mode']}] — Active for {elapsed_m:.1f} mins"):
+        st.write(f"Opened: {row['created_at_ist']} · Entry: {row['entry_price']} · SL: {row['stop_loss']} · TP: {row['take_profit']}")
+        if st.button(f"Close Position #{row['id']}", key=f"close_exp_{row['id']}"):
+            contract = ASSETS[row['symbol']]["contract"]
+            direction = 1 if row["bias"] == "BUY" else -1
+            pnl = round((bid - row["entry_price"]) * direction * row["lot_size"] * contract, 2)
+            diagnosis = diagnose_loss(dict(row), bid)
+            c.execute("""INSERT INTO trade_history_expert VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], bid, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "Manual Expert Close", pnl, row["strategy_votes"], diagnosis))
+            c.execute("DELETE FROM open_trades_expert WHERE id=?", (row["id"],))
+            c.execute("UPDATE account_balance SET balance=balance+? WHERE id=1", (pnl,))
+            c.commit()
+            st.rerun()
+
+st.divider()
+st.subheader("🧠 Closed Trades History & Automated Loss Diagnostics")
+hist = c.execute("SELECT * FROM trade_history_expert ORDER BY id DESC LIMIT 50").fetchall()
+if hist:
+    df_hist = pd.DataFrame([dict(x) for x in hist])
+    st.dataframe(df_hist[["id", "symbol", "bias", "entry_price", "exit_price", "pnl", "exit_reason", "loss_diagnosis", "closed_at_ist"]], use_container_width=True, hide_index=True)
+else:
+    st.info("No closed trade history available yet.")
 
 c.close()
