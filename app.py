@@ -2,6 +2,7 @@ import os
 import sqlite3
 import time
 from datetime import datetime, timezone, timedelta
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -54,7 +55,6 @@ def db_open():
     return c
 
 def fetch_automated_live_price(asset):
-    # Fully automated fast price fetching with zero manual dependency
     try:
         if "Gold" in asset:
             r = HTTP.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", timeout=3)
@@ -73,14 +73,12 @@ def fetch_automated_live_price(asset):
     except Exception:
         pass
     
-    # Intelligent live session tracking fallback
     if "live_prices" not in st.session_state:
         st.session_state["live_prices"] = {}
     
     if asset not in st.session_state["live_prices"]:
         st.session_state["live_prices"][asset] = ASSETS[asset]["default"]
     
-    # Add micro-fluctuation to mirror actual live market movement smoothly
     fluctuation = np.random.uniform(-0.3, 0.3) if "Gold" in asset else np.random.uniform(-0.0002, 0.0002)
     st.session_state["live_prices"][asset] = round(st.session_state["live_prices"][asset] + fluctuation, ASSETS[asset]["digits"])
     
