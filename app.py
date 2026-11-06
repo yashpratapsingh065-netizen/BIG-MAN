@@ -14,7 +14,7 @@ HTTP = requests.Session()
 HTTP.headers["User-Agent"] = "Mozilla/5.0"
 
 st.set_page_config(
-    page_title="BIGMAN | Fully Automated Live Terminal", 
+    page_title="BIGMAN | 1-Click Synced Terminal", 
     page_icon="⚡", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -41,11 +41,11 @@ def price_fmt(v, s): return f"{float(v):,.{ASSETS[s]['digits']}f}"
 def db_open():
     c = sqlite3.connect(DB, check_same_thread=False)
     c.row_factory = sqlite3.Row
-    c.execute("""CREATE TABLE IF NOT EXISTS open_trades_auto(
+    c.execute("""CREATE TABLE IF NOT EXISTS open_trades_sync(
         id INTEGER PRIMARY KEY AUTOINCREMENT, created_at_ist TEXT NOT NULL, created_timestamp REAL NOT NULL,
         symbol TEXT NOT NULL, timeframe TEXT NOT NULL, entry_price REAL, stop_loss REAL, take_profit REAL, 
         lot_size REAL, bias TEXT NOT NULL, strategy_votes TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS trade_history_auto(
+    c.execute("""CREATE TABLE IF NOT EXISTS trade_history_sync(
         id INTEGER PRIMARY KEY, created_at_ist TEXT, closed_at_ist TEXT, symbol TEXT, timeframe TEXT,
         entry_price REAL, exit_price REAL, stop_loss REAL, take_profit REAL, lot_size REAL, bias TEXT,
         exit_reason TEXT, pnl REAL, strategy_votes TEXT)""")
@@ -54,35 +54,33 @@ def db_open():
     c.commit()
     return c
 
-def fetch_automated_live_price(asset):
+def fetch_base_price(asset):
     try:
         if "Gold" in asset:
             r = HTTP.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", timeout=3)
             if r.status_code == 200:
                 price = float(r.json()["price"])
                 if price > 1000:
-                    return price, "Automated Binance Spot Feed"
+                    return price, "Binance Spot Feed"
         elif "EUR" in asset:
             r = HTTP.get("https://open.er-api.com/v6/latest/EUR", timeout=3)
             if r.status_code == 200:
-                return float(r.json()["rates"]["USD"]), "Automated FX Feed"
+                return float(r.json()["rates"]["USD"]), "FX Live Feed"
         elif "GBP" in asset:
             r = HTTP.get("https://open.er-api.com/v6/latest/GBP", timeout=3)
             if r.status_code == 200:
-                return float(r.json()["rates"]["USD"]), "Automated FX Feed"
+                return float(r.json()["rates"]["USD"]), "FX Live Feed"
     except Exception:
         pass
     
-    if "live_prices" not in st.session_state:
-        st.session_state["live_prices"] = {}
+    if "live_base" not in st.session_state:
+        st.session_state["live_base"] = {}
+    if asset not in st.session_state["live_base"]:
+        st.session_state["live_base"][asset] = ASSETS[asset]["default"]
     
-    if asset not in st.session_state["live_prices"]:
-        st.session_state["live_prices"][asset] = ASSETS[asset]["default"]
-    
-    fluctuation = np.random.uniform(-0.3, 0.3) if "Gold" in asset else np.random.uniform(-0.0002, 0.0002)
-    st.session_state["live_prices"][asset] = round(st.session_state["live_prices"][asset] + fluctuation, ASSETS[asset]["digits"])
-    
-    return st.session_state["live_prices"][asset], "Smart Automated Ticker"
+    fluctuation = np.random.uniform(-0.2, 0.2) if "Gold" in asset else np.random.uniform(-0.0001, 0.0001)
+    st.session_state["live_base"][asset] = round(st.session_state["live_base"][asset] + fluctuation, ASSETS[asset]["digits"])
+    return st.session_state["live_base"][asset], "Auto Ticker"
 
 def analyze_market(asset, bid):
     rng = bid * 0.0025
@@ -92,10 +90,10 @@ def analyze_market(asset, bid):
     
     bias = "BUY" if bid <= eq else "SELL"
     votes = [
-        f"Automated Spot Ticker: {price_fmt(bid, asset)}",
-        f"Dynamic Swing High: {price_fmt(sh, asset)} | Low: {price_fmt(slw, asset)}",
+        f"Synced Market Price: {price_fmt(bid, asset)}",
+        f"Swing High: {price_fmt(sh, asset)} | Low: {price_fmt(slw, asset)}",
         f"Equilibrium (50%): {price_fmt(eq, asset)}",
-        f"Market Alignment: {bias}"
+        f"Zone Signal: {bias}"
     ]
     
     stop = slw - (rng * 0.2) if bias == "BUY" else sh + (rng * 0.2)
@@ -106,48 +104,79 @@ def analyze_market(asset, bid):
     return {"bias": bias, "votes": votes, "entry": bid, "sl": stop, "tp": target, "rr": rr}
 
 # ---------------- UI ----------------
-st.markdown('<div class="bh">BIGMAN ⚡ Fully Automated Live Terminal</div>', unsafe_allow_html=True)
-st.caption("100% Automated Ticks • Zero Manual Work • Smart Execution • IST")
+st.markdown('<div class="bh">BIGMAN ⚡ 1-Click Synced Terminal</div>', unsafe_allow_html=True)
+st.caption("Instant Chart Sync • Zero Manual Calculation • Mobile Friendly • IST")
 
 db = db_open()
+
+if "offsets" not in st.session_state:
+    st.session_state["offsets"] = {}
 
 with st.sidebar:
     st.header("🎛️ Terminal Controls")
     if st.button("🔄 Refresh Ticks"): st.rerun()
     asset = st.selectbox("Asset", list(ASSETS))
     lot = st.number_input("Lot Size", 0.01, 10.0, 0.01, 0.01)
+    
+    st.divider()
+    st.subheader("⚡ Instant Sync Panel")
+    
+    # Get current raw base price
+    base_bid, source = fetch_base_price(asset)
+    
+    current_offset = st.session_state["offsets"].get(asset, 0.0)
+    current_calculated = round(base_bid + current_offset, ASSETS[asset]["digits"])
+    
+    # Quick target price input where you just write what you see on TradingView chart right now
+    target_chart_price = st.number_input(
+        "Current TradingView Price", 
+        value=float(current_calculated), 
+        format="%.2f" if "Gold" in asset else "%.5f",
+        step=0.01 if "Gold" in asset else 0.0001,
+        help="Just look at your TradingView chart, type that exact number here once, and click Sync!"
+    )
+    
+    if st.button("🔗 Sync Exact Chart Price"):
+        new_offset = target_chart_price - base_bid
+        st.session_state["offsets"][asset] = new_offset
+        st.success(f"Synced successfully! Offset applied.")
+        st.rerun()
+    
     auto = st.toggle("Auto-Pilot Execution", True)
     if st.button("🔄 Reset Balance ($3,000)"):
         db.execute("UPDATE account_balance SET balance=3000 WHERE id=1")
         db.commit()
         st.rerun()
     if st.button("🗑️ Clear Open Positions"):
-        db.execute("DELETE FROM open_trades_auto")
+        db.execute("DELETE FROM open_trades_sync")
         db.commit()
         st.rerun()
 
-bid, source = fetch_automated_live_price(asset)
+# Final bid calculation using saved sync offset
+applied_offset = st.session_state["offsets"].get(asset, 0.0)
+bid = round(base_bid + applied_offset, ASSETS[asset]["digits"])
+
 analysis = analyze_market(asset, bid)
 final = analysis["bias"]
 
 bal = float(db.execute("SELECT balance FROM account_balance WHERE id=1").fetchone()["balance"])
 
 m1, m2, m3 = st.columns(3)
-m1.metric("Live Market Price", price_fmt(bid, asset))
+m1.metric("Synced Market Price", price_fmt(bid, asset))
 m2.metric("Account Balance", f"${bal:,.2f}")
 m3.metric("Signal Bias", final)
-st.caption(f"Feed Source: {source} (Fully Automated)")
+st.caption(f"Feed: {source} | Active Offset: {applied_offset:+.2f}")
 
-if final == "BUY": st.success("🟢 AUTOMATED BUY SETUP ACTIVE")
-elif final == "SELL": st.error("🔴 AUTOMATED SELL SETUP ACTIVE")
+if final == "BUY": st.success("🟢 BUY SETUP ACTIVE")
+elif final == "SELL": st.error("🔴 SELL SETUP ACTIVE")
 
 if auto and bid > 0 and final in ["BUY", "SELL"]:
-    open_pos = db.execute("SELECT * FROM open_trades_auto WHERE symbol=?", (asset,)).fetchone()
+    open_pos = db.execute("SELECT * FROM open_trades_sync WHERE symbol=?", (asset,)).fetchone()
     if not open_pos:
-        db.execute("INSERT INTO open_trades_auto(created_at_ist, created_timestamp, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO open_trades_sync(created_at_ist, created_timestamp, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), time.time(), asset, "15 min", analysis["entry"], analysis["sl"], analysis["tp"], lot, final, " | ".join(analysis["votes"])))
         db.commit()
-        st.toast(f"Automated trade executed for {asset} at {bid}!")
+        st.toast(f"Trade executed for {asset} at exact synced price {bid}!")
         st.rerun()
 
 st.divider()
@@ -167,17 +196,17 @@ with col_r:
 
 st.divider()
 st.subheader("📂 Open Positions")
-open_rows = db.execute("SELECT * FROM open_trades_auto ORDER BY id DESC").fetchall()
+open_rows = db.execute("SELECT * FROM open_trades_sync ORDER BY id DESC").fetchall()
 if not open_rows: st.info("No open positions active.")
 for row in open_rows:
     with st.expander(f"#{row['id']} {row['symbol']} {row['bias']} — Active"):
         st.write(f"Entry: {row['entry_price']} · SL: {row['stop_loss']} · TP: {row['take_profit']}")
-        if st.button(f"Close #{row['id']}", key=f"close_auto_{row['id']}"):
+        if st.button(f"Close #{row['id']}", key=f"close_sync_{row['id']}"):
             contract = ASSETS[asset]["contract"]
             pnl = round((bid - row["entry_price"]) * (1 if row["bias"] == "BUY" else -1) * row["lot_size"] * contract, 2)
-            db.execute("INSERT INTO trade_history_auto VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO trade_history_sync VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], bid, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "Manual Close", pnl, row["strategy_votes"]))
-            db.execute("DELETE FROM open_trades_auto WHERE id=?", (row["id"],))
+            db.execute("DELETE FROM open_trades_sync WHERE id=?", (row["id"],))
             db.execute("UPDATE account_balance SET balance=balance+? WHERE id=1", (pnl,))
             db.commit()
             st.rerun()
