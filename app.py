@@ -394,7 +394,7 @@ m1.metric("Provider Live Bid", price_fmt(bid, asset))
 m2.metric("Provider Ask", price_fmt(ask, asset))
 m3.metric("Paper Balance", f"${bal:,.2f}")
 m4.metric("Active Signal", final)
-st.caption(f"Feed: {source} · Active reversal engine ready for Monday.")
+st.caption(f"Feed: {source} · Active reversal engine ready.")
 
 if final == "BUY": 
     st.success("🟢 BUY Signal Active")
@@ -456,4 +456,45 @@ with left:
     st.subheader("📈 TradingView Chart (Visual Reference)")
     tv = ASSETS[asset]["tv"]
     tvint = TFS[tf][3]
-    htm
+    html = f'<iframe src="https://s.tradingview.com/widgetembed/?symbol={tv}&interval={tvint}&theme=dark&style=1&timezone=Asia%2FKolkata&locale=en" width="100%" height="450" style="border:0"></iframe>'
+    components.html(html, height=460, scrolling=False)
+with right:
+    st.subheader("📋 Active Trade Plan")
+    if r15["sl"] is not None:
+        st.write("**Direction:** " + r15["bias"])
+        st.write("**Entry Reference:** " + price_fmt(r15["entry"], asset))
+        st.write("**Stop Loss:** " + price_fmt(r15["sl"], asset))
+        st.write("**Take Profit:** " + price_fmt(r15["tp"], asset))
+        if r15["rr"] is not None: 
+            st.write(f"**Target R:R:** {r15['rr']:.2f}:1")
+    else: 
+        st.info("Awaiting entry formation.")
+
+st.divider()
+st.subheader("📂 Open Trades (Auto-closes after 15 mins)")
+rows = c.execute("SELECT * FROM open_trades_v72 ORDER BY id DESC").fetchall()
+if not rows: 
+    st.info("No open trades.")
+for row in rows:
+    elapsed_m = (time.time() - row["created_timestamp"]) / 60.0
+    with st.expander(f"#{row['id']} {row['symbol']} {row['bias']} [{row['execution_mode']}] — Open for {elapsed_m:.1f} mins"):
+        st.write(f"Opened {row['created_at_ist']} · Entry {row['entry_price']} · SL {row['stop_loss']} · TP {row['take_profit']} · Lot {row['lot_size']}")
+        if st.button(f"Close Trade #{row['id']}", key=f"close_{row['id']}"):
+            pnl = paper_pnl(row, bid, row["symbol"])
+            c.execute("""INSERT INTO trade_history_v72 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], bid, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "Manual close", pnl, row["strategy_votes"]))
+            c.execute("DELETE FROM open_trades_v72 WHERE id=?", (row["id"],))
+            c.execute("UPDATE account_balance SET balance=balance+? WHERE id=1", (pnl,))
+            c.commit()
+            st.rerun()
+
+st.divider()
+st.subheader("📜 Closed Trades History")
+hist = c.execute("SELECT * FROM trade_history_v72 ORDER BY id DESC LIMIT 100").fetchall()
+if hist:
+    h = pd.DataFrame([dict(x) for x in hist])
+    st.dataframe(h[["id", "symbol", "bias", "entry_price", "exit_price", "pnl", "exit_reason", "closed_at_ist"]], use_container_width=True, hide_index=True)
+else:
+    st.info("No closed trades yet.")
+
+c.close()
