@@ -118,17 +118,17 @@ def mt5_data(asset, tf, n=250):
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_twelve_data(sym, interval, apikey):
     url = "https://api.twelvedata.com"
-    p = {"symbol": sym, "interval": interval, "outputsize": 250, "timezone": "UTC", "apikey": apikey}
+    p = {"symbol": sym, "interval": interval, "outputsize": 150, "timezone": "UTC", "apikey": apikey}
     
     r = None
-    for attempt in range(3):
-        time.sleep(2.0 * (attempt + 1))
+    for attempt in range(4):
+        time.sleep(3.0 * (attempt + 1))
         r = HTTP.get(url + "/time_series", params=p, timeout=20)
         if r.status_code != 429:
             break
             
     if r is None or r.status_code == 429:
-        raise RuntimeError("Twelve Data rate limit (429) hit. Please wait a moment and try refreshing.")
+        raise RuntimeError("Twelve Data rate limit (429) hit. Please wait 60 seconds before refreshing.")
         
     r.raise_for_status()
     j = r.json()
@@ -151,19 +151,28 @@ def twelve_data(asset, tf, n=250):
         raise RuntimeError("TWELVE_DATA_API_KEY missing.")
     mins, _, interval, _ = TFS[tf]
     sym = ASSETS[asset]["td"]
+    
     d = cached_twelve_data(sym, interval, API_KEY)
     d = d[d.index <= pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=mins)]
     
     url = "https://api.twelvedata.com"
-    time.sleep(1.0)
-    q = HTTP.get(url + "/price", params={"symbol": sym, "apikey": API_KEY}, timeout=12)
-    q.raise_for_status()
-    qj = q.json()
-    if "price" not in qj: 
-        raise RuntimeError("Twelve Data quote: " + str(qj))
-    bid = float(qj["price"])
+    bid = 0.0
+    try:
+        time.sleep(1.5)
+        q = HTTP.get(url + "/price", params={"symbol": sym, "apikey": API_KEY}, timeout=10)
+        if q.status_code != 429:
+            qj = q.json()
+            if "price" in qj:
+                bid = float(qj["price"])
+    except Exception:
+        pass
+        
+    if bid <= 0 and not d.empty:
+        bid = float(d.iloc[-1]["close"]) # Fallback to latest candle close on rate limit
+        
     if not np.isfinite(bid) or bid <= 0: 
-        raise RuntimeError("Invalid Twelve Data quote.")
+        raise RuntimeError("Invalid Twelve Data price feed.")
+        
     return d.tail(n), bid, bid, f"Twelve Data ({sym})", None
 
 def market_data(asset, tf, provider):
