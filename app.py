@@ -115,12 +115,21 @@ def mt5_data(asset, tf, n=250):
         raise RuntimeError("Invalid MT5 bid/ask.")
     return d.tail(n), bid, ask, f"MetaTrader 5 broker feed ({sym})", info
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def cached_twelve_data(sym, interval, apikey):
-    time.sleep(1.0)
     url = "https://api.twelvedata.com"
     p = {"symbol": sym, "interval": interval, "outputsize": 250, "timezone": "UTC", "apikey": apikey}
-    r = HTTP.get(url + "/time_series", params=p, timeout=15)
+    
+    r = None
+    for attempt in range(3):
+        time.sleep(2.0 * (attempt + 1))
+        r = HTTP.get(url + "/time_series", params=p, timeout=20)
+        if r.status_code != 429:
+            break
+            
+    if r is None or r.status_code == 429:
+        raise RuntimeError("Twelve Data rate limit (429) hit. Please wait a moment and try refreshing.")
+        
     r.raise_for_status()
     j = r.json()
     if "values" not in j: 
@@ -146,6 +155,7 @@ def twelve_data(asset, tf, n=250):
     d = d[d.index <= pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=mins)]
     
     url = "https://api.twelvedata.com"
+    time.sleep(1.0)
     q = HTTP.get(url + "/price", params={"symbol": sym, "apikey": API_KEY}, timeout=12)
     q.raise_for_status()
     qj = q.json()
