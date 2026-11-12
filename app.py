@@ -164,8 +164,13 @@ for row in open_rows:
         if st.button(f"Close #{row['id']}", key=f"close_master_{row['id']}"):
             contract = ASSETS[asset]["contract"]
             pnl = round((live_price - row["entry_price"]) * (1 if row["bias"] == "BUY" else -1) * row["lot_size"] * contract, 2)
-            db.execute("INSERT INTO trade_history_master VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            
+            # Explicit column insert mapping to prevent mismatch schema errors
+            db.execute("""INSERT INTO trade_history_master 
+                (id, created_at_ist, closed_at_ist, symbol, timeframe, entry_price, exit_price, stop_loss, take_profit, lot_size, bias, exit_reason, pnl, strategy_votes) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], live_price, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "Manual Close", pnl, row["strategy_votes"]))
+            
             db.execute("DELETE FROM open_trades_master WHERE id=?", (row["id"],))
             db.execute("UPDATE account_balance SET balance=balance+? WHERE id=1", (pnl,))
             db.commit()
