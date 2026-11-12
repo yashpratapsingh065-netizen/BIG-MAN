@@ -2,8 +2,7 @@ import os
 import sqlite3
 import time
 from datetime import datetime, timezone, timedelta
-import numpy as np
-import pandas as pd
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -11,7 +10,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 DB = os.getenv("BIGMAN_DB_PATH", "bigman_price_lesson.db")
 
 st.set_page_config(
-    page_title="BIGMAN | Master Override Terminal", 
+    page_title="BIGMAN | Live Market Terminal", 
     page_icon="⚡", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,9 +26,9 @@ h1, h2, h3 { color: white; font-family: 'Inter', sans-serif; }
 </style>""", unsafe_allow_html=True)
 
 ASSETS = {
-    "XAU/USD (Gold)": {"tv": "OANDA:XAUUSD", "digits": 2, "contract": 100.0, "default": 3033.0},
-    "EUR/USD": {"tv": "FX:EURUSD", "digits": 5, "contract": 100000.0, "default": 1.0850},
-    "GBP/USD": {"tv": "FX:GBPUSD", "digits": 5, "contract": 100000.0, "default": 1.3000},
+    "XAU/USD (Gold)": {"twelve_symbol": "XAU/USD", "tv": "OANDA:XAUUSD", "digits": 2, "contract": 100.0, "default": 3033.0},
+    "EUR/USD": {"twelve_symbol": "EUR/USD", "tv": "FX:EURUSD", "digits": 5, "contract": 100000.0, "default": 1.0850},
+    "GBP/USD": {"twelve_symbol": "GBP/USD", "tv": "FX:GBPUSD", "digits": 5, "contract": 100000.0, "default": 1.3000},
 }
 
 def now_ist(): return datetime.now(IST)
@@ -51,6 +50,17 @@ def db_open():
     c.commit()
     return c
 
+def fetch_twelve_data_price(symbol, api_key):
+    try:
+        url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={api_key}"
+        res = requests.get(url, timeout=5)
+        data = res.json()
+        if "price" in data:
+            return float(data["price"])
+    except Exception:
+        pass
+    return None
+
 def analyze_market(asset, bid):
     rng = bid * 0.0025
     sh = bid + (rng * 0.5)
@@ -59,7 +69,7 @@ def analyze_market(asset, bid):
     
     bias = "BUY" if bid <= eq else "SELL"
     votes = [
-        f"Master Locked Chart Price: {price_fmt(bid, asset)}",
+        f"Live Twelve Data Price: {price_fmt(bid, asset)}",
         f"Structure Swing High: {price_fmt(sh, asset)} | Low: {price_fmt(slw, asset)}",
         f"Equilibrium (50% Zone): {price_fmt(eq, asset)}",
         f"SMC Strategy Bias: {bias}"
@@ -73,17 +83,16 @@ def analyze_market(asset, bid):
     return {"bias": bias, "votes": votes, "entry": bid, "sl": stop, "tp": target, "rr": rr}
 
 # ---------------- UI ----------------
-st.markdown('<div class="bh">BIGMAN ⚡ Master Override Terminal</div>', unsafe_allow_html=True)
-st.caption("100% Exact Chart Match via Master Lock • Zero API Mismatch • IST")
+st.markdown('<div class="bh">BIGMAN ⚡ Live Market Terminal</div>', unsafe_allow_html=True)
+st.caption("Automated Twelve Data API Integration • SMC Strategy • IST")
 
 db = db_open()
-
-if "master_prices" not in st.session_state:
-    st.session_state["master_prices"] = {}
 
 with st.sidebar:
     st.header("🎛️ Terminal Controls")
     asset = st.selectbox("Asset", list(ASSETS))
+    default_api_key = os.getenv("TWELVE_DATA_API_KEY", "")
+    api_key = st.text_input("Twelve Data API Key", value=default_api_key, type="password")
     lot = st.number_input("Lot Size", 0.01, 10.0, 0.01, 0.01)
     auto = st.toggle("Auto-Pilot Execution", True)
     
@@ -97,50 +106,37 @@ with st.sidebar:
         db.commit()
         st.rerun()
 
-# MASTER OVERRIDE PANEL RIGHT ON TOP
-st.markdown("### 🎯 Live Chart Price Master Lock")
-col_inp1, col_inp2 = st.columns([3, 1])
+# Fetch Live Price from Twelve Data API
+twelve_sym = ASSETS[asset]["twelve_symbol"]
+live_price = None
+if api_key:
+    live_price = fetch_twelve_data_price(twelve_sym, api_key)
 
-default_val = st.session_state["master_prices"].get(asset, ASSETS[asset]["default"])
+if live_price is None:
+    live_price = ASSETS[asset]["default"]
+    st.warning(f"⚠️ Using fallback price for {asset}. Please check your Twelve Data API key.")
 
-with col_inp1:
-    user_entered_price = st.number_input(
-        "Type exact price from your TradingView chart here:",
-        value=float(default_val),
-        format="%.2f" if "Gold" in asset else "%.5f",
-        step=0.01 if "Gold" in asset else 0.0001,
-        key=f"input_{asset}"
-    )
-
-with col_inp2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🔒 Lock Price"):
-        st.session_state["master_prices"][asset] = user_entered_price
-        st.success("Price Locked!")
-        st.rerun()
-
-bid = st.session_state["master_prices"].get(asset, user_entered_price)
-analysis = analyze_market(asset, bid)
+analysis = analyze_market(asset, live_price)
 final = analysis["bias"]
 
 bal = float(db.execute("SELECT balance FROM account_balance WHERE id=1").fetchone()["balance"])
 
 m1, m2, m3 = st.columns(3)
-m1.metric("Active Execution Price", price_fmt(bid, asset))
+m1.metric("Live Market Price", price_fmt(live_price, asset))
 m2.metric("Account Balance", f"${bal:,.2f}")
 m3.metric("Signal Bias", final)
-st.caption("Status: Locked & Synced with your visual chart view")
+st.caption("Status: Live & Synchronized with Twelve Data API")
 
-if final == "BUY": st.success("🟢 MASTER BUY SETUP ACTIVE")
-elif final == "SELL": st.error("🔴 MASTER SELL SETUP ACTIVE")
+if final == "BUY": st.success("🟢 SMC BUY SETUP ACTIVE")
+elif final == "SELL": st.error("🔴 SMC SELL SETUP ACTIVE")
 
-if auto and bid > 0 and final in ["BUY", "SELL"]:
+if auto and live_price > 0 and final in ["BUY", "SELL"]:
     open_pos = db.execute("SELECT * FROM open_trades_master WHERE symbol=?", (asset,)).fetchone()
     if not open_pos:
         db.execute("INSERT INTO open_trades_master(created_at_ist, created_timestamp, symbol, timeframe, entry_price, stop_loss, take_profit, lot_size, bias, strategy_votes) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), time.time(), asset, "15 min", analysis["entry"], analysis["sl"], analysis["tp"], lot, final, " | ".join(analysis["votes"])))
         db.commit()
-        st.toast(f"Trade executed at exact locked price {bid}!")
+        st.toast(f"Trade executed at live price {live_price}!")
         st.rerun()
 
 st.divider()
@@ -167,9 +163,9 @@ for row in open_rows:
         st.write(f"Entry: {row['entry_price']} · SL: {row['stop_loss']} · TP: {row['take_profit']}")
         if st.button(f"Close #{row['id']}", key=f"close_master_{row['id']}"):
             contract = ASSETS[asset]["contract"]
-            pnl = round((bid - row["entry_price"]) * (1 if row["bias"] == "BUY" else -1) * row["lot_size"] * contract, 2)
+            pnl = round((live_price - row["entry_price"]) * (1 if row["bias"] == "BUY" else -1) * row["lot_size"] * contract, 2)
             db.execute("INSERT INTO trade_history_master VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], bid, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "Manual Close", pnl, row["strategy_votes"]))
+                (row["id"], row["created_at_ist"], now_ist().strftime("%Y-%m-%d %I:%M:%S %p IST"), row["symbol"], row["timeframe"], row["entry_price"], live_price, row["stop_loss"], row["take_profit"], row["lot_size"], row["bias"], "Manual Close", pnl, row["strategy_votes"]))
             db.execute("DELETE FROM open_trades_master WHERE id=?", (row["id"],))
             db.execute("UPDATE account_balance SET balance=balance+? WHERE id=1", (pnl,))
             db.commit()
